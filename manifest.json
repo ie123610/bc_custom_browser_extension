@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "__MSG_name__",
+  "description": "__MSG_description__",
+  "version": "0.0.2",
+  "default_locale": "zh_CN",
+  "icons": {
+    "16": "images/menu_logo.png",
+    "48": "images/extension_logo.png",
+    "128": "images/install_logo.png"
+  },
+  "action": {
+    "default_icon": "images/icon19_normal.png",
+    "default_title": "__MSG_description__",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "bc-background.js"
+  },
+  "permissions": [
+    "contextMenus",
+    "cookies",
+    "nativeMessaging",
+    "downloads",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ]
+}

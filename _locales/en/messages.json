@@ -1,0 +1,26 @@
+{
+   "name": {
+ 	  "message": "BitComet Download Extension Unofficial"
+   },
+   "description": {
+      "message": "helps to download files with BitComet"
+   },
+   "context_menu_title": {
+      "message": "Download with BitComet"
+   },
+   "popup_enable_bitcomet": {
+      "message": "Capture file download"
+   },
+   "popup_launch_program": {
+      "message": "Launch BitComet"
+   },
+   "notification_title": {
+      "message": "Transfer download to BitComet?"
+   },
+   "OK": {
+      "message": "OK"
+   },
+   "Cancel": {
+      "message": "No need"
+   }
+ }
