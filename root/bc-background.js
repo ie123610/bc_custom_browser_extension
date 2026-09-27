@@ -144,6 +144,7 @@ function InvokeGetHostConfig() {
 		if (chrome.runtime.lastError) {
 			console.log("InvokeGetHostConfig Error: " + chrome.runtime.lastError.message);
 		} else if (response) {
+			console.log("Received Config: " + JSON.stringify(response));
 			let settingValues = await chrome.storage.local.get(["sExtFilterList"]);
 			if (typeof settingValues == 'undefined' || settingValues.sExtFilterList != response.ext_list) {
 				chrome.storage.local.set({ sExtFilterList: response.ext_list });
