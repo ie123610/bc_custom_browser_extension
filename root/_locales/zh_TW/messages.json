@@ -13,14 +13,5 @@
    },
    "popup_launch_program": {
       "message": "啟動 BitComet"
-   },
-   "notification_title": {
-      "message": "转移到 BitComet 下載？"
-   },
-   "OK": {
-      "message": "好的"
-   },
-   "Cancel": {
-      "message": "不用"
    }
 }

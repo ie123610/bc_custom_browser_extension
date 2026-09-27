@@ -13,14 +13,5 @@
    },
    "popup_launch_program": {
       "message": "Launch BitComet"
-   },
-   "notification_title": {
-      "message": "Transfer download to BitComet?"
-   },
-   "OK": {
-      "message": "OK"
-   },
-   "Cancel": {
-      "message": "No need"
    }
  }
