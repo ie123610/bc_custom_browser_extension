@@ -127,7 +127,7 @@ function InvokeDownload(link, cookie, referurl) {
 	  { action: "Download", link: link, cookie: cookie, referurl: referurl },
 	  function(response) {
 		if (chrome.runtime.lastError) {
-			console.log("InvokeDownload Error: " + chrome.runtime.lastError.message);
+			console.error("InvokeDownload Error: " + chrome.runtime.lastError.message);
 		} else {
 			console.log("InvokeDownload Received: " + JSON.stringify(response));
 		}
@@ -142,7 +142,8 @@ function InvokeGetHostConfig() {
 	  { action: "GetConfig" },
 	  async function(response) {
 		if (chrome.runtime.lastError) {
-			console.log("InvokeGetHostConfig Error: " + chrome.runtime.lastError.message);
+			// 改为 console.error，从而使错误日志能够直接收集并展示在 chrome://extensions 页面中
+			console.error("[BitComet Native 通信错误] 无法与客户端建立连接: " + chrome.runtime.lastError.message);
 		} else if (response) {
 			console.log("Received Config: " + JSON.stringify(response));
 			let settingValues = await chrome.storage.local.get(["sExtFilterList"]);
@@ -161,7 +162,7 @@ function InvokeLaunchProgram() {
 	  { action: "Launch_Program" },
 	  function(response) {
 		if (chrome.runtime.lastError) {
-			console.log("LaunchProgram Error: " + chrome.runtime.lastError.message);
+			console.error("LaunchProgram Error: " + chrome.runtime.lastError.message);
 		}
 	  });
 }
@@ -228,8 +229,14 @@ function RegisterEventListener() {
 	});
 }
 
-function Init() {
+/**
+ * 仅在插件首次安装/更新/加载时进行一次 Native 通信预检
+ */
+chrome.runtime.onInstalled.addListener(() => {
 	InvokeGetHostConfig();
+});
+
+function Init() {
 	CreateContextMenu();
 	UpdateBrowserActionIcon();
 	RegisterEventListener();
