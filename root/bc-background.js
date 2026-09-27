@@ -1,21 +1,21 @@
 ﻿const BITCOMET_NATIVE_HOST = 'com.bitcomet.chrome_extension';
 const contextMenuId = "BitCometContextMenu";
 
-// 全局缓存配置状态[cite: 13, 17]
+// 全局缓存配置状态
 const storageCache = {
 	bPluginEnabled: true,
 	sExtFilterList: ""
 };
 
 /**
- * 获取目标 URL Cookie 并透传给比特彗星 Native 宿主程序[cite: 13, 15, 17]
+ * 获取目标 URL Cookie 并透传给比特彗星 Native 宿主程序
  */
 function sendToBitComet(downloadItem) {
   return new Promise((resolve) => {
-    const targetUrl = downloadItem.finalUrl || downloadItem.url; // 优先取重定向后的终点地址[cite: 15, 17]
+    const targetUrl = downloadItem.finalUrl || downloadItem.url; // 优先取重定向后的终点地址
     const referrerUrl = downloadItem.referrer || '';
 
-    // 获取完整 Cookie 以支持带鉴权/防盗链的下载[cite: 13, 15, 17]
+    // 获取完整 Cookie 以支持带鉴权/防盗链的下载
     chrome.cookies.getAll({ url: targetUrl }, (cookies) => {
       let cookieString = '';
       if (cookies && cookies.length > 0) {
@@ -45,10 +45,10 @@ function sendToBitComet(downloadItem) {
 }
 
 /**
- * 核心拦截：接管下载文件名确定事件，取代原版的弹窗告警流程[cite: 13, 15, 17]
+ * 核心拦截：接管下载文件名确定事件，取代原版的弹窗告警流程
  */
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
-  // 读取插件全局使能开关，若插件被禁用，则直接恢复原生下载[cite: 13, 15, 17]
+  // 读取插件全局使能开关，若插件被禁用，则直接恢复原生下载
   chrome.storage.local.get(["bPluginEnabled"], (result) => {
     const isEnabled = result.bPluginEnabled !== false; // 默认开启
 
@@ -57,10 +57,10 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
       return;
     }
 
-    // 插件开启状态下，无条件静默推送到比特彗星[cite: 15, 17]
+    // 插件开启状态下，无条件静默推送到比特彗星
     sendToBitComet(item).then((success) => {
       if (success) {
-        // 推送成功：自动取消并清理浏览器端的原生下载任务[cite: 13, 15, 17]
+        // 推送成功：自动取消并清理浏览器端的原生下载任务
         try {
           chrome.downloads.cancel(item.id, () => {
             chrome.downloads.erase({ id: item.id });
@@ -70,17 +70,17 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
           console.error("[BitComet Ext] 取消下载任务失败:", err);
         }
       } else {
-        // 推送失败（例如比特彗星未启动）：回退交由浏览器原生下载[cite: 15, 17]
+        // 推送失败（例如比特彗星未启动）：回退交由浏览器原生下载
         suggest({ filename: item.filename, conflictAction: 'uniquify' });
       }
     });
   });
 
-  return true; // 保持异步回调机制[cite: 15, 17]
+  return true; // 保持异步回调机制
 });
 
 /**
- * 设置插件开关状态，同步修改存储与图标 UI[cite: 13, 17]
+ * 设置插件开关状态，同步修改存储与图标 UI
  */
 function SetPluginEnabled(bEnabled) {
 	chrome.storage.local.set({ bPluginEnabled: bEnabled });
@@ -88,7 +88,7 @@ function SetPluginEnabled(bEnabled) {
 }
 
 /**
- * 右键菜单点击处理逻辑[cite: 13, 17]
+ * 右键菜单点击处理逻辑
  */
 function onStartupDownload(info, tab) {
 	if (info.pageUrl == "chrome://downloads/") {
@@ -107,7 +107,7 @@ function onStartupDownload(info, tab) {
 }
 
 /**
- * 手动右键下载时提取 Cookie 并调起比特彗星[cite: 13, 17]
+ * 手动右键下载时提取 Cookie 并调起比特彗星
  */
 function PrepareDownload(link, refererUrl) {
 	chrome.cookies.getAll({ url: link }, function(cookies) {
@@ -120,7 +120,7 @@ function PrepareDownload(link, refererUrl) {
 }
 
 /**
- * 直接向 Native Messenger 发送二进制任务指令[cite: 13, 17]
+ * 直接向 Native Messenger 发送二进制任务指令
  */
 function InvokeDownload(link, cookie, referurl) {
 	chrome.runtime.sendNativeMessage(BITCOMET_NATIVE_HOST,
@@ -135,7 +135,7 @@ function InvokeDownload(link, cookie, referurl) {
 }
 
 /**
- * 获取客户端配置（例如比特彗星内部设定的扩展名列表）[cite: 13, 17]
+ * 获取客户端配置（例如比特彗星内部设定的扩展名列表）
  */
 function InvokeGetHostConfig() {
 	chrome.runtime.sendNativeMessage(BITCOMET_NATIVE_HOST,
@@ -153,7 +153,7 @@ function InvokeGetHostConfig() {
 }
 
 /**
- * 调起比特彗星客户端主界面[cite: 13, 17]
+ * 调起比特彗星客户端主界面
  */
 function InvokeLaunchProgram() {
 	chrome.runtime.sendNativeMessage(BITCOMET_NATIVE_HOST,
@@ -166,11 +166,17 @@ function InvokeLaunchProgram() {
 }
 
 /**
- * 初始化右键菜单[cite: 13, 17]
+ * 初始化右键菜单
  */
 function CreateContextMenu() {
 	chrome.contextMenus.removeAll(function() {
-		chrome.contextMenus.create({ id: contextMenuId, type: "normal", title: "Download with BitComet", contexts: ["link"], enabled: true });
+		chrome.contextMenus.create({
+			id: contextMenuId,
+			type: "normal",
+			title: chrome.i18n.getMessage("context_menu_title"),
+			contexts: ["link"],
+			enabled: true
+		});
 		chrome.contextMenus.onClicked.addListener((info, tab) => {
 			if (info.menuItemId == contextMenuId) {
 				onStartupDownload(info, tab);
@@ -184,7 +190,7 @@ function UpdateContextMenuTitle(title) {
 }
 
 /**
- * 根据插件开/关状态动态切换工具栏上的显示图标[cite: 13, 17]
+ * 根据插件开/关状态动态切换工具栏上的显示图标
  */
 async function UpdateBrowserActionIcon(bPluginEnabled) {
 	if (bPluginEnabled == null) {
@@ -197,7 +203,7 @@ async function UpdateBrowserActionIcon(bPluginEnabled) {
 }
 
 /**
- * 注册与外部 UI（Popup 弹窗页面）通信的消息监听器[cite: 13, 17]
+ * 注册与外部 UI（Popup 弹窗页面）通信的消息监听器
  */
 function RegisterEventListener() {
 	chrome.windows.onFocusChanged.addListener(function(windowId) {
