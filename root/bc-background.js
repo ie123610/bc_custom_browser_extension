@@ -12,33 +12,49 @@ const storageCache = {
  */
 function sendToBitComet(downloadItem) {
   return new Promise((resolve) => {
-    const targetUrl = downloadItem.finalUrl || downloadItem.url; // 优先取重定向后的终点地址
+    const originalUrl = downloadItem.url || '';
+    const finalUrl = downloadItem.finalUrl || downloadItem.url; // 优先取重定向后的终点地址
     const referrerUrl = downloadItem.referrer || '';
 
-    // 获取完整 Cookie 以支持带鉴权/防盗链的下载
-    chrome.cookies.getAll({ url: targetUrl }, (cookies) => {
-      let cookieString = '';
-      if (cookies && cookies.length > 0) {
-        cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-      }
+    // 调试输出：打印当前下载任务的原始 URL 与最终重定向 URL
+    console.group("[下载任务传递信息]");
+    console.log("-> 原始请求 URL (originalUrl):", originalUrl);
+    console.log("-> 重定向终点 URL (finalUrl):", finalUrl);
+    console.log("-> 来源页面 (referrerUrl):", referrerUrl);
 
-      const payload = {
-        action: "Download",
-        link: targetUrl,
-        cookie: cookieString,
-        referurl: referrerUrl
-      };
+    // 优先尝试获取原始 URL (如 github.com) 的 Cookie，若无则尝试获取最终 URL 的 Cookie
+    chrome.cookies.getAll({ url: originalUrl }, (origCookies) => {
+      chrome.cookies.getAll({ url: finalUrl }, (finalCookies) => {
+        // 合并并去重两者的 Cookie 结果
+        const cookieMap = new Map();
+        if (origCookies) origCookies.forEach(c => cookieMap.set(c.name, c.value));
+        if (finalCookies) finalCookies.forEach(c => cookieMap.set(c.name, c.value));
 
-      console.log("[BitComet Ext] 发送任务至比特彗星:", payload);
+        const cookieList = Array.from(cookieMap.entries()).map(([k, v]) => `${k}=${v}`);
+        const cookieString = cookieList.join('; ');
 
-      chrome.runtime.sendNativeMessage(BITCOMET_NATIVE_HOST, payload, (response) => {
-        if (chrome.runtime.lastError) {
-          console.error("[BitComet Ext] 调用 Native Host 失败:", chrome.runtime.lastError.message);
-          resolve(false);
-        } else {
-          console.log("[BitComet Ext] 比特彗星响应成功:", response);
-          resolve(true);
-        }
+        console.log(`-> 查找到的 Cookie 数量: ${cookieMap.size} 个`);
+        console.log("-> 最终生成的 Cookie 字符串:", cookieString || "(空)");
+
+        const payload = {
+          action: "Download",
+          link: finalUrl,
+          cookie: cookieString,
+          referurl: referrerUrl
+        };
+
+        console.log("-> 发送给 Native Host 的完整 Payload 数据:", JSON.stringify(payload, null, 2));
+        console.groupEnd();
+
+        chrome.runtime.sendNativeMessage(BITCOMET_NATIVE_HOST, payload, (response) => {
+          if (chrome.runtime.lastError) {
+            console.error("[下载任务传递信息] 调用 Native Host 失败:", chrome.runtime.lastError.message);
+            resolve(false);
+          } else {
+            console.log("[下载任务传递信息] 比特彗星响应成功:", response);
+            resolve(true);
+          }
+        });
       });
     });
   });
@@ -64,10 +80,10 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
         try {
           chrome.downloads.cancel(item.id, () => {
             chrome.downloads.erase({ id: item.id });
-            console.log(`[BitComet Ext] 已自动接管并清除内置下载 (ID: ${item.id})`);
+            console.log(`[下载任务传递信息] 已自动接管并清除内置下载 (ID: ${item.id})`);
           });
         } catch (err) {
-          console.error("[BitComet Ext] 取消下载任务失败:", err);
+          console.error("[下载任务传递信息] 取消下载任务失败:", err);
         }
       } else {
         // 推送失败（例如比特彗星未启动）：回退交由浏览器原生下载
@@ -110,11 +126,13 @@ function onStartupDownload(info, tab) {
  * 手动右键下载时提取 Cookie 并调起比特彗星
  */
 function PrepareDownload(link, refererUrl) {
+	console.log("[下载任务传递信息] 右键触发下载，开始读取 Cookie:", link);
 	chrome.cookies.getAll({ url: link }, function(cookies) {
 		var cookie = "";
 		for (var i in cookies) {
 			cookie = cookie.concat(cookies[i].name, "=", cookies[i].value, "; ");
 		}
+		console.log("[下载任务传递信息] 右键提取的 Cookie 字符串:", cookie || "(空)");
 		InvokeDownload(link, cookie, refererUrl);
 	});
 }
@@ -123,8 +141,9 @@ function PrepareDownload(link, refererUrl) {
  * 直接向 Native Messenger 发送二进制任务指令
  */
 function InvokeDownload(link, cookie, referurl) {
-	chrome.runtime.sendNativeMessage(BITCOMET_NATIVE_HOST,
-	  { action: "Download", link: link, cookie: cookie, referurl: referurl },
+	const payload = { action: "Download", link: link, cookie: cookie, referurl: referurl };
+	console.log("[下载任务传递信息] InvokeDownload 发送 Payload:", payload);
+	chrome.runtime.sendNativeMessage(BITCOMET_NATIVE_HOST, payload,
 	  function(response) {
 		if (chrome.runtime.lastError) {
 			console.error("InvokeDownload Error: " + chrome.runtime.lastError.message);
@@ -142,7 +161,6 @@ function InvokeGetHostConfig() {
 	  { action: "GetConfig" },
 	  async function(response) {
 		if (chrome.runtime.lastError) {
-			// 改为 console.error，从而使错误日志能够直接收集并展示在 chrome://extensions 页面中
 			console.error("[BitComet Native 通信错误] 无法与客户端建立连接: " + chrome.runtime.lastError.message);
 		} else if (response) {
 			console.log("Received Config: " + JSON.stringify(response));
