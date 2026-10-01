@@ -8,7 +8,7 @@ const storageCache = {
 };
 
 /**
- * 获取目标 URL Cookie 并透传给比特彗星 Native 宿主程序
+ * 获取目标 URL Cookie 并透退给比特彗星 Native 宿主程序
  */
 function sendToBitComet(downloadItem) {
   return new Promise((resolve) => {
@@ -48,12 +48,20 @@ function sendToBitComet(downloadItem) {
         console.groupEnd();
 
         chrome.runtime.sendNativeMessage(BITCOMET_NATIVE_HOST, payload, (response) => {
+          // 1. 检查是否存在管道断开等通信级错误
           if (chrome.runtime.lastError) {
             console.error("[下载任务传递信息] 调用 Native Host 失败:", chrome.runtime.lastError.message);
             resolve(false);
-          } else {
+            return;
+          }
+
+          // 2. 检查 Native Host 返回的业务状态
+          if (response && response.status === "ok") {
             console.log("[下载任务传递信息] 比特彗星响应成功:", response);
             resolve(true);
+          } else {
+            console.error("[下载任务传递信息] 比特彗星响应错误，详细原因:", response ? response.message : "未知响应格式");
+            resolve(false);
           }
         });
       });
@@ -74,7 +82,7 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
       return;
     }
 
-    // 插件开启状态下，无条件静默推送到比特彗星
+    // 插件开启状态下，静默推送到比特彗星
     sendToBitComet(item).then((success) => {
       if (success) {
         // 推送成功：自动取消并清理浏览器端的原生下载任务
@@ -87,7 +95,8 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
           console.error("[下载任务传递信息] 取消下载任务失败:", err);
         }
       } else {
-        // 推送失败（例如比特彗星未启动）：回退交由浏览器原生下载
+        // 推送失败（如注册表损坏、客户端启动失败等）：降级回退交由浏览器原生下载
+        console.warn("[下载任务传递信息] 调起比特彗星失败，回退为浏览器原生下载");
         suggest({ filename: item.filename, conflictAction: 'uniquify' });
       }
     });
@@ -154,8 +163,10 @@ function InvokeDownload(link, cookie, referurl) {
 	  function(response) {
 		if (chrome.runtime.lastError) {
 			console.error("InvokeDownload Error: " + chrome.runtime.lastError.message);
+		} else if (response && response.status === "ok") {
+			console.log("InvokeDownload Received Success: " + JSON.stringify(response));
 		} else {
-			console.log("InvokeDownload Received: " + JSON.stringify(response));
+			console.error("InvokeDownload Received Error: " + JSON.stringify(response));
 		}
 	  });
 }
@@ -188,6 +199,8 @@ function InvokeLaunchProgram() {
 	  function(response) {
 		if (chrome.runtime.lastError) {
 			console.error("LaunchProgram Error: " + chrome.runtime.lastError.message);
+		} else if (response && response.status !== "ok") {
+			console.error("LaunchProgram Failed: " + JSON.stringify(response));
 		}
 	  });
 }
