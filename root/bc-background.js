@@ -40,7 +40,8 @@ function sendToBitComet(downloadItem) {
           action: "Download",
           link: finalUrl,
           cookie: cookieString,
-          referurl: referrerUrl
+          referurl: referrerUrl,
+          user_agent: navigator.userAgent
         };
 
         console.log("-> 发送给 Native Host 的完整 Payload 数据:", JSON.stringify(payload, null, 2));
@@ -141,7 +142,13 @@ function PrepareDownload(link, refererUrl) {
  * 直接向 Native Messenger 发送二进制任务指令
  */
 function InvokeDownload(link, cookie, referurl) {
-	const payload = { action: "Download", link: link, cookie: cookie, referurl: referurl };
+	const payload = { 
+		action: "Download", 
+		link: link, 
+		cookie: cookie, 
+		referurl: referurl,
+		user_agent: navigator.userAgent
+	};
 	console.log("[下载任务传递信息] InvokeDownload 发送 Payload:", payload);
 	chrome.runtime.sendNativeMessage(BITCOMET_NATIVE_HOST, payload,
 	  function(response) {
