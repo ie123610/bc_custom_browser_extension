@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+		<title>BitComet Download Extension</title>
+		<style type="text/css">
+			body,html,div{ margin:0; padding:0;}
+			body{ font:12px/1.5 \5FAE\8F6F\96C5\9ED1,\5B8B\4F53, Tahoma, Geneva, sans-serif; color:#222}
+			.item-box{border-top:1px solid #DDDDDD; min-width:240px; padding:0 0 3px 0}
+			.item-box:nth-child(1){border-top:0 none;}
+			.item{ position:relative; display:-webkit-box;-webkit-box-sizing:border-box; min-width:190px; height:25px;-webkit-box-align:center; padding-left:23px; padding-right:13px;border:1px solid #fff; margin-top:3px; cursor:pointer;}
+			.item:hover{border:1px solid #BBCCDD;-webkit-border-radius:3px; background:-webkit-gradient(linear,0 0,0 100%,from(#fdfeff),to(#EEF2F9),color-stop(0.5,rgba(237,242,249,1)),color-stop(0.33,rgba(237,242,249,1)))}
+			.item:after{ display:none;}
+			.item-selected:after{ display:block; content:""; position:absolute; left:4px; top:4px; background:url(images/selected.png) no-repeat; width:16px; height:16px;}
+			.item-unselect:after{ display:block; content:""; position:absolute; left:4px; top:4px; background:url(images/unselected.png) no-repeat; width:16px; height:16px;}
+			.item-disable{ position:relative; display:-webkit-box;-webkit-box-sizing:border-box; min-width:190px; height:25px; -webkit-box-align:center; padding-left:23px; padding-right:13px;border:1px solid #fff; margin-top:3px; color:#aaa }
+		</style>
+	</head>
+	<!--Webkit Only-->
+	<body>
+		<div class="item-box">
+			 <div class="item item-selected" id="EnableDownloadCapture">popup_enable_bitcomet</div>
+		</div>
+		<div class="item-box">
+			<div class="item" id="LaunchProgram">popup_launch_program</div> 
+		</div>
+		<script src="js/popup.js"></script>
+	</body>
+</html>

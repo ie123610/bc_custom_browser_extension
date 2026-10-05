@@ -1,0 +1,17 @@
+{
+   "name": {
+ 	  "message": "BitComet Download Extension Unofficial"
+   },
+   "description": {
+      "message": "helps to download files with BitComet by ie12"
+   },
+   "context_menu_title": {
+      "message": "Download with BitComet"
+   },
+   "popup_enable_bitcomet": {
+      "message": "Capture file download"
+   },
+   "popup_launch_program": {
+      "message": "Launch BitComet"
+   }
+ }

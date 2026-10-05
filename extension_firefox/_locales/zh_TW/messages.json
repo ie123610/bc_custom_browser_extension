@@ -1,0 +1,17 @@
+{
+   "name": {
+      "message": "BitComet 擴充外掛程式 非官方版"
+   },
+   "description": {
+      "message": "使用 BitComet 下載檔案 by ie12"
+   },
+   "context_menu_title": {
+      "message": "使用 BitComet 下載"
+   },
+   "popup_enable_bitcomet": {
+      "message": "捕獲文件下載"
+   },
+   "popup_launch_program": {
+      "message": "啟動 BitComet"
+   }
+}

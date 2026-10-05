@@ -1,4 +1,6 @@
-﻿const BITCOMET_NATIVE_HOST = 'org.custom.bitcomet_bridge';
+﻿// Chrome 插件
+
+const BITCOMET_NATIVE_HOST = 'org.custom.bitcomet_bridge';
 const contextMenuId = "BitCometContextMenu";
 
 // 全局缓存配置状态
