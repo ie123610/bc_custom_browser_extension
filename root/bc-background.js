@@ -71,19 +71,41 @@ function sendToBitComet(downloadItem) {
 }
 
 /**
- * 核心拦截：接管下载文件名确定事件，取代原版的弹窗告警流程
+ * 核心拦截：接管下载文件名确定事件，增加扩展名过滤比对机制
  */
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
-  // 读取插件全局使能开关，若插件被禁用，则直接恢复原生下载
-  chrome.storage.local.get(["bPluginEnabled"], (result) => {
+  // 读取插件使能状态及允许接管的扩展名配置列表
+  chrome.storage.local.get(["bPluginEnabled", "sExtFilterList"], (result) => {
     const isEnabled = result.bPluginEnabled !== false; // 默认开启
 
+    // 1. 若插件被禁用，直接放行恢复原生下载
     if (!isEnabled) {
       suggest({ filename: item.filename, conflictAction: 'uniquify' });
       return;
     }
 
-    // 插件开启状态下，静默推送到比特彗星
+    // 2. 提取文件名扩展名并与从 Native Host 获取的配置进行比对校验
+    const filename = item.filename || "";
+    const extMatch = filename.match(/\.([a-zA-Z0-9]+)$/);
+    const fileExt = extMatch ? extMatch[1].toLowerCase() : "";
+
+    const filterString = (result.sExtFilterList || "").toLowerCase();
+    const filterExtArray = filterString
+      .split(';')
+      .map(ext => ext.trim().replace(/^\./, ''))
+      .filter(Boolean);
+
+    const isMatch = fileExt && filterExtArray.includes(fileExt);
+
+    // 3. 未命中接管扩展名（如图片 .jpg/.png/.webp、文档 .pdf 等），或无法连接 Native Host 获取配置时，直接放行给浏览器下载
+    if (!isMatch) {
+      console.log(`[下载任务拦截] 文件名 "${filename}" 的扩展名 (.${fileExt}) 未在拦截列表中，放行交由浏览器原生下载。`);
+      suggest({ filename: item.filename, conflictAction: 'uniquify' });
+      return;
+    }
+
+    // 4. 命中拦截扩展名，推送到比特彗星
+    console.log(`[下载任务拦截] 文件名 "${filename}" 匹配接管扩展名 (.${fileExt})，准备推送到比特彗星...`);
     sendToBitComet(item).then((success) => {
       if (success) {
         // 推送成功：自动取消并清理浏览器端的原生下载任务
@@ -96,7 +118,7 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
           console.error("[下载任务传递信息] 取消下载任务失败:", err);
         }
       } else {
-        // 推送失败（如注册表损坏、客户端启动失败等）：降级回退交由浏览器原生下载
+        // 推送失败：降级回退交由浏览器原生下载
         console.warn("[下载任务传递信息] 调起比特彗星失败，回退为浏览器原生下载");
         suggest({ filename: item.filename, conflictAction: 'uniquify' });
       }
