@@ -39,6 +39,7 @@ function sendToBitComet(downloadItem) {
         const payload = {
           action: "Download",
           link: finalUrl,
+          name: downloadItem.filename, // 传入 Chrome 解析出的精准文件名
           cookie: cookieString,
           referurl: referrerUrl,
           user_agent: navigator.userAgent
@@ -114,61 +115,42 @@ function SetPluginEnabled(bEnabled) {
 }
 
 /**
- * 右键菜单点击处理逻辑
+ * 右键菜单点击处理逻辑：强制转化为 Chrome 原生下载任务，交由 onDeterminingFilename 事件捕获与解析文件名
  */
 function onStartupDownload(info, tab) {
-	if (info.pageUrl == "chrome://downloads/") {
+	let targetUrl = info.linkUrl || info.srcUrl || info.pageUrl;
+	let refererUrl = info.pageUrl || "";
+
+	if (info.pageUrl === "chrome://downloads/") {
 		chrome.downloads.search(
-			{ url: info.linkUrl, orderBy: ['-startTime'], limit: 1 },
+			{ url: targetUrl, orderBy: ['-startTime'], limit: 1 },
 			function(data) {
-				var refererUrl = "";
 				if (data && data.length > 0) {
-					refererUrl = data[0].referrer;
+					refererUrl = data[0].referrer || refererUrl;
 				}
-				PrepareDownload(info.linkUrl, refererUrl);
-			});
+				ForceTriggerChromeDownload(targetUrl, refererUrl);
+			}
+		);
 	} else {
-		PrepareDownload(info.linkUrl, info.pageUrl);
+		ForceTriggerChromeDownload(targetUrl, refererUrl);
 	}
 }
 
 /**
- * 手动右键下载时提取 Cookie 并调起比特彗星
+ * 通过调用 chrome.downloads.download 强制唤醒下载流，利用 Chrome 完成 HTTP 预检和文件名提取
  */
-function PrepareDownload(link, refererUrl) {
-	console.log("[下载任务传递信息] 右键触发下载，开始读取 Cookie:", link);
-	chrome.cookies.getAll({ url: link }, function(cookies) {
-		var cookie = "";
-		for (var i in cookies) {
-			cookie = cookie.concat(cookies[i].name, "=", cookies[i].value, "; ");
-		}
-		console.log("[下载任务传递信息] 右键提取的 Cookie 字符串:", cookie || "(空)");
-		InvokeDownload(link, cookie, refererUrl);
-	});
-}
-
-/**
- * 直接向 Native Messenger 发送二进制任务指令
- */
-function InvokeDownload(link, cookie, referurl) {
-	const payload = { 
-		action: "Download", 
-		link: link, 
-		cookie: cookie, 
-		referurl: referurl,
-		user_agent: navigator.userAgent
-	};
-	console.log("[下载任务传递信息] InvokeDownload 发送 Payload:", payload);
-	chrome.runtime.sendNativeMessage(BITCOMET_NATIVE_HOST, payload,
-	  function(response) {
+function ForceTriggerChromeDownload(link, refererUrl) {
+	console.log("[下载任务传递信息] 右键强制重定向为原生下载流程:", link);
+	chrome.downloads.download({
+		url: link,
+		saveAs: false
+	}, (downloadId) => {
 		if (chrome.runtime.lastError) {
-			console.error("InvokeDownload Error: " + chrome.runtime.lastError.message);
-		} else if (response && response.status === "ok") {
-			console.log("InvokeDownload Received Success: " + JSON.stringify(response));
+			console.error("[下载任务传递信息] 触发原生下载失败:", chrome.runtime.lastError.message);
 		} else {
-			console.error("InvokeDownload Received Error: " + JSON.stringify(response));
+			console.log(`[下载任务传递信息] 成功触发临时原生下载任务 (ID: ${downloadId})，等待拦截管线捕获文件名...`);
 		}
-	  });
+	});
 }
 
 /**
@@ -206,7 +188,7 @@ function InvokeLaunchProgram() {
 }
 
 /**
- * 初始化右键菜单
+ * 初始化右键菜单：支持链接、图片、音频和视频等多种右键场景
  */
 function CreateContextMenu() {
 	chrome.contextMenus.removeAll(function() {
@@ -214,7 +196,7 @@ function CreateContextMenu() {
 			id: contextMenuId,
 			type: "normal",
 			title: chrome.i18n.getMessage("context_menu_title"),
-			contexts: ["link"],
+			contexts: ["link", "image", "audio", "video"],
 			enabled: true
 		});
 		chrome.contextMenus.onClicked.addListener((info, tab) => {
@@ -253,7 +235,7 @@ function RegisterEventListener() {
 
 	chrome.runtime.onMessage.addListener(function(message, sender, response) {
 		if (message.name == "CaptureDownload") {
-			InvokeDownload(message.link, message.cookie, message.referurl);
+			ForceTriggerChromeDownload(message.link, message.referurl);
 		} else if (message.name == "CheckHostConfig") {
 			InvokeGetHostConfig();
 		} else if (message.name === 'setContextMenuTitle') {
