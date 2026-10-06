@@ -10,6 +10,43 @@ const storageCache = {
 };
 
 /**
+ * 移植自 Xdown 的 CookieManager
+ */
+function CookieManager()
+{
+}
+
+CookieManager.prototype.getCookiesForUrl = function(url, callback) 
+{
+    this.getCookiesForUrls([url], function (result) {
+        callback(result[0]);
+    });
+}
+
+CookieManager.prototype.getCookiesForUrls = function(
+    urls, callback)
+{
+    var remained = urls.length;
+    var result = [];
+    for (var i = 0; i < urls.length; ++i) {
+        chrome.cookies.getAll(
+            { 'url': urls[i] },
+            function (resultIndex, cookies) {
+                var cookiesString = "";
+                if (cookies) {
+                    cookiesString = cookies.map(function (cookie) {
+                        return cookie.name + "=" + cookie.value + ";";
+                    }).join(' ');
+                }
+                result[resultIndex] = cookiesString;
+                if (!--remained) {
+                    callback(result);
+                }
+            }.bind(this, i));
+    }
+}
+
+/**
  * 获取目标 URL Cookie 并透退给比特彗星 Native 宿主程序
  */
 function sendToBitComet(downloadItem) {
@@ -24,18 +61,11 @@ function sendToBitComet(downloadItem) {
     console.log("-> 重定向终点 URL (finalUrl):", finalUrl);
     console.log("-> 来源页面 (referrerUrl):", referrerUrl);
 
-    // 优先尝试获取原始 URL (如 github.com) 的 Cookie，若无则尝试获取最终 URL 的 Cookie
-    chrome.cookies.getAll({ url: originalUrl }, (origCookies) => {
-      chrome.cookies.getAll({ url: finalUrl }, (finalCookies) => {
-        // 合并并去重两者的 Cookie 结果
-        const cookieMap = new Map();
-        if (origCookies) origCookies.forEach(c => cookieMap.set(c.name, c.value));
-        if (finalCookies) finalCookies.forEach(c => cookieMap.set(c.name, c.value));
+    // 移植 Xdown 的 Cookie 获取调用方式
+    var cManager = new CookieManager();
+    cManager.getCookiesForUrl(finalUrl, function (cookies) {
+        const cookieString = cookies || '';
 
-        const cookieList = Array.from(cookieMap.entries()).map(([k, v]) => `${k}=${v}`);
-        const cookieString = cookieList.join('; ');
-
-        console.log(`-> 查找到的 Cookie 数量: ${cookieMap.size} 个`);
         console.log("-> 最终生成的 Cookie 字符串:", cookieString || "(空)");
 
         const payload = {
@@ -67,7 +97,6 @@ function sendToBitComet(downloadItem) {
             resolve(false);
           }
         });
-      });
     });
   });
 }
