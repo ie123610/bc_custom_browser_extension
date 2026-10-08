@@ -10,7 +10,7 @@ const storageCache = {
 };
 
 /**
- * 移植自 Xdown 的 CookieManager
+ * 移植自 Xdown 并升级为多源去重合并的 CookieManager
  */
 function CookieManager()
 {
@@ -27,22 +27,27 @@ CookieManager.prototype.getCookiesForUrls = function(
     urls, callback)
 {
     var remained = urls.length;
-    var result = [];
+    var cookieMap = new Map();
+
     for (var i = 0; i < urls.length; ++i) {
         chrome.cookies.getAll(
             { 'url': urls[i] },
-            function (resultIndex, cookies) {
-                var cookiesString = "";
+            function (cookies) {
                 if (cookies) {
-                    cookiesString = cookies.map(function (cookie) {
-                        return cookie.name + "=" + cookie.value + ";";
-                    }).join(' ');
+                    cookies.forEach(function (c) {
+                        if (c && c.name) {
+                            cookieMap.set(c.name, c.value);
+                        }
+                    });
                 }
-                result[resultIndex] = cookiesString;
                 if (!--remained) {
-                    callback(result);
+                    var cookieList = Array.from(cookieMap.entries()).map(function (entry) {
+                        return entry[0] + "=" + entry[1];
+                    });
+                    var cookiesString = cookieList.join('; ');
+                    callback([cookiesString]);
                 }
-            }.bind(this, i));
+            });
     }
 }
 
@@ -55,16 +60,20 @@ function sendToBitComet(downloadItem) {
     const finalUrl = downloadItem.finalUrl || downloadItem.url; // 优先取重定向后的终点地址
     const referrerUrl = downloadItem.referrer || '';
 
+    // 收集所有关联的 URL 来源（去重且排除空字符串）
+    const targetUrls = Array.from(new Set([finalUrl, originalUrl, referrerUrl].filter(Boolean)));
+
     // 调试输出：打印当前下载任务的原始 URL 与最终重定向 URL
     console.group("[下载任务传递信息]");
     console.log("-> 原始请求 URL (originalUrl):", originalUrl);
     console.log("-> 重定向终点 URL (finalUrl):", finalUrl);
     console.log("-> 来源页面 (referrerUrl):", referrerUrl);
+    console.log("-> 收集到的所有 Cookie 查询 Target URLs:", targetUrls);
 
-    // 移植 Xdown 的 Cookie 获取调用方式
+    // 调用升级后的 CookieManager 获取多源合并后的 Cookie
     var cManager = new CookieManager();
-    cManager.getCookiesForUrl(finalUrl, function (cookies) {
-        const cookieString = cookies || '';
+    cManager.getCookiesForUrls(targetUrls, function (results) {
+        const cookieString = (results && results[0]) || '';
 
         console.log("-> 最终生成的 Cookie 字符串:", cookieString || "(空)");
 
