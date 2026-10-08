@@ -1,4 +1,4 @@
-﻿// firefox 插件
+﻿// Chrome 插件
 
 const BITCOMET_NATIVE_HOST = 'org.custom.bitcomet_bridge';
 const contextMenuId = "BitCometContextMenu";
@@ -10,30 +10,71 @@ const storageCache = {
 };
 
 /**
- * 跨浏览器兼容的 Native Messaging 安全调用封装（支持 Chrome Callback & Firefox Promise 错误捕获）
+ * 移植自 Xdown 并升级为多源去重、域优先及长度限制合并的 CookieManager
  */
-function sendNativeMessageSafe(message) {
-  return new Promise((resolve, reject) => {
-    try {
-      // 优先使用 Firefox (WebExtensions) 原生 Promise 机制
-      if (typeof browser !== 'undefined' && browser.runtime && browser.runtime.sendNativeMessage) {
-        browser.runtime.sendNativeMessage(BITCOMET_NATIVE_HOST, message)
-          .then(response => resolve(response))
-          .catch(error => reject(error));
-      } else {
-        // 回退到 Chrome 回调机制
-        chrome.runtime.sendNativeMessage(BITCOMET_NATIVE_HOST, message, (response) => {
-          if (chrome.runtime.lastError) {
-            reject(new Error(chrome.runtime.lastError.message));
-          } else {
-            resolve(response);
-          }
-        });
-      }
-    } catch (err) {
-      reject(err);
+function CookieManager()
+{
+}
+
+CookieManager.prototype.getCookiesForUrl = function(url, callback) 
+{
+    this.getCookiesForUrls([url], function (result) {
+        callback(result[0]);
+    });
+}
+
+CookieManager.prototype.getCookiesForUrls = function(
+    urls, callback)
+{
+    var remained = urls.length;
+    var rawResults = new Array(urls.length);
+
+    // 1. 按传入的 URL 数组顺序独立收集 Cookie 结果
+    for (var i = 0; i < urls.length; ++i) {
+        chrome.cookies.getAll(
+            { 'url': urls[i] },
+            function (index, cookies) {
+                rawResults[index] = cookies || [];
+                if (!--remained) {
+                    var cookieMap = new Map();
+
+                    // 2. 逆序合并（倒序遍历使优先级最高的域名/URL 后写入，从而覆盖低优先级的同名 Cookie）
+                    for (var j = rawResults.length - 1; j >= 0; --j) {
+                        var currentList = rawResults[j];
+                        for (var k = 0; k < currentList.length; ++k) {
+                            var c = currentList[k];
+                            if (c && c.name) {
+                                cookieMap.set(c.name, c.value);
+                            }
+                        }
+                    }
+
+                    // 3. 构建 Cookie 键值对列表
+                    var cookieList = Array.from(cookieMap.entries()).map(function (entry) {
+                        return entry[0] + "=" + entry[1];
+                    });
+
+                    // 4. 应用 Cookie 字符串安全长度上限限制（防止 HTTP 431 / Header Too Large）
+                    var MAX_COOKIE_LENGTH = 4096; // 设定 4KB 安全上限
+                    var resultList = [];
+                    var currentLength = 0;
+
+                    for (var m = 0; m < cookieList.length; ++m) {
+                        var item = cookieList[m];
+                        var itemLength = item.length + (resultList.length > 0 ? 2 : 0); // 包含 '; ' 分隔符长度
+                        if (currentLength + itemLength > MAX_COOKIE_LENGTH) {
+                            console.warn("[CookieManager] Cookie 总体积超过安全上限 (" + MAX_COOKIE_LENGTH + " B)，已安全截断后续字段。");
+                            break;
+                        }
+                        resultList.push(item);
+                        currentLength += itemLength;
+                    }
+
+                    var cookiesString = resultList.join('; ');
+                    callback([cookiesString]);
+                }
+            }.bind(this, i));
     }
-  });
 }
 
 /**
@@ -45,30 +86,27 @@ function sendToBitComet(downloadItem) {
     const finalUrl = downloadItem.finalUrl || downloadItem.url; // 优先取重定向后的终点地址
     const referrerUrl = downloadItem.referrer || '';
 
+    // 按优先级排列查询 Target URLs（下标 0 优先级最高：finalUrl -> originalUrl -> referrerUrl）
+    const targetUrls = Array.from(new Set([finalUrl, originalUrl, referrerUrl].filter(Boolean)));
+
     // 调试输出：打印当前下载任务的原始 URL 与最终重定向 URL
     console.group("[下载任务传递信息]");
     console.log("-> 原始请求 URL (originalUrl):", originalUrl);
     console.log("-> 重定向终点 URL (finalUrl):", finalUrl);
     console.log("-> 来源页面 (referrerUrl):", referrerUrl);
+    console.log("-> 收集到的所有 Cookie 查询 Target URLs (按优先级排列):", targetUrls);
 
-    // 优先尝试获取原始 URL (如 github.com) 的 Cookie，若无则尝试获取最终 URL 的 Cookie
-    chrome.cookies.getAll({ url: originalUrl }, (origCookies) => {
-      chrome.cookies.getAll({ url: finalUrl }, (finalCookies) => {
-        // 合并并去重两者的 Cookie 结果
-        const cookieMap = new Map();
-        if (origCookies) origCookies.forEach(c => cookieMap.set(c.name, c.value));
-        if (finalCookies) finalCookies.forEach(c => cookieMap.set(c.name, c.value));
+    // 调用升级后的 CookieManager 获取多源合并后的 Cookie
+    var cManager = new CookieManager();
+    cManager.getCookiesForUrls(targetUrls, function (results) {
+        const cookieString = (results && results[0]) || '';
 
-        const cookieList = Array.from(cookieMap.entries()).map(([k, v]) => `${k}=${v}`);
-        const cookieString = cookieList.join('; ');
-
-        console.log(`-> 查找到的 Cookie 数量: ${cookieMap.size} 个`);
         console.log("-> 最终生成的 Cookie 字符串:", cookieString || "(空)");
 
         const payload = {
           action: "Download",
           link: finalUrl,
-          name: downloadItem.filename, // 传入 Chrome/Firefox 解析出的精准文件名
+          name: downloadItem.filename, // 传入 Chrome 解析出的精准文件名
           cookie: cookieString,
           referurl: referrerUrl,
           user_agent: navigator.userAgent
@@ -77,36 +115,38 @@ function sendToBitComet(downloadItem) {
         console.log("-> 发送给 Native Host 的完整 Payload 数据:", JSON.stringify(payload, null, 2));
         console.groupEnd();
 
-        // 使用兼容与 Firefox 的错误捕捉机制调用 Native Host
-        sendNativeMessageSafe(payload)
-          .then((response) => {
-            if (response && response.status === "ok") {
-              console.log("[下载任务传递信息] 比特彗星响应成功:", response);
-              resolve(true);
-            } else {
-              console.error("[下载任务传递信息] 比特彗星响应错误，详细原因:", response ? response.message : "未知响应格式");
-              resolve(false);
-            }
-          })
-          .catch((err) => {
-            console.error("[下载任务传递信息] 调用 Native Host 失败:", err.message || err);
+        chrome.runtime.sendNativeMessage(BITCOMET_NATIVE_HOST, payload, (response) => {
+          // 1. 检查是否存在管道断开等通信级错误
+          if (chrome.runtime.lastError) {
+            console.error("[下载任务传递信息] 调用 Native Host 失败:", chrome.runtime.lastError.message);
             resolve(false);
-          });
-      });
+            return;
+          }
+
+          // 2. 检查 Native Host 返回的业务状态
+          if (response && response.status === "ok") {
+            console.log("[下载任务传递信息] 比特彗星响应成功:", response);
+            resolve(true);
+          } else {
+            console.error("[下载任务传递信息] 比特彗星响应错误，详细原因:", response ? response.message : "未知响应格式");
+            resolve(false);
+          }
+        });
     });
   });
 }
 
 /**
- * 提取下载逻辑统一处理函数（同时兼容 Chrome 的 suggest 预检与 Firefox 的创建拦截）
+ * 核心拦截：接管下载文件名确定事件，增加扩展名过滤比对机制
  */
-function ProcessDownloadIntercept(item, suggest) {
+chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+  // 读取插件使能状态及允许接管的扩展名配置列表
   chrome.storage.local.get(["bPluginEnabled", "sExtFilterList"], (result) => {
     const isEnabled = result.bPluginEnabled !== false; // 默认开启
 
     // 1. 若插件被禁用，直接放行恢复原生下载
     if (!isEnabled) {
-      if (suggest) suggest({ filename: item.filename, conflictAction: 'uniquify' });
+      suggest({ filename: item.filename, conflictAction: 'uniquify' });
       return;
     }
 
@@ -123,10 +163,10 @@ function ProcessDownloadIntercept(item, suggest) {
 
     const isMatch = fileExt && filterExtArray.includes(fileExt);
 
-    // 3. 未命中接管扩展名（如图片 .jpg/.png/.webp、文档 .pdf 等），或无法连接 Native Host 获取配置时，直接放行交由浏览器下载
+    // 3. 未命中接管扩展名（如图片 .jpg/.png/.webp、文档 .pdf 等），或无法连接 Native Host 获取配置时，直接放行给浏览器下载
     if (!isMatch) {
       console.log(`[下载任务拦截] 文件名 "${filename}" 的扩展名 (.${fileExt}) 未在拦截列表中，放行交由浏览器原生下载。`);
-      if (suggest) suggest({ filename: item.filename, conflictAction: 'uniquify' });
+      suggest({ filename: item.filename, conflictAction: 'uniquify' });
       return;
     }
 
@@ -146,27 +186,13 @@ function ProcessDownloadIntercept(item, suggest) {
       } else {
         // 推送失败：降级回退交由浏览器原生下载
         console.warn("[下载任务传递信息] 调起比特彗星失败，回退为浏览器原生下载");
-        if (suggest) suggest({ filename: item.filename, conflictAction: 'uniquify' });
+        suggest({ filename: item.filename, conflictAction: 'uniquify' });
       }
     });
   });
-}
 
-/**
- * 跨浏览器兼容：绑定下载事件监听器
- */
-if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
-  // Chrome / Edge 规范：支持预先确定文件名
-  chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
-    ProcessDownloadIntercept(item, suggest);
-    return true; // 保持异步回调机制
-  });
-} else if (chrome.downloads && chrome.downloads.onCreated) {
-  // Firefox 规范：使用 onCreated 捕获下载任务并拦截
-  chrome.downloads.onCreated.addListener((item) => {
-    ProcessDownloadIntercept(item, null);
-  });
-}
+  return true; // 保持异步回调机制
+});
 
 /**
  * 设置插件开关状态，同步修改存储与图标 UI
@@ -219,33 +245,33 @@ function ForceTriggerChromeDownload(link, refererUrl) {
  * 获取客户端配置（例如比特彗星内部设定的扩展名列表）
  */
 function InvokeGetHostConfig() {
-	sendNativeMessageSafe({ action: "GetConfig" })
-	  .then(async (response) => {
-		if (response) {
+	chrome.runtime.sendNativeMessage(BITCOMET_NATIVE_HOST,
+	  { action: "GetConfig" },
+	  async function(response) {
+		if (chrome.runtime.lastError) {
+			console.error("[BitComet Native 通信错误] 无法与客户端建立连接: " + chrome.runtime.lastError.message);
+		} else if (response) {
 			console.log("Received Config: " + JSON.stringify(response));
 			let settingValues = await chrome.storage.local.get(["sExtFilterList"]);
 			if (typeof settingValues == 'undefined' || settingValues.sExtFilterList != response.ext_list) {
 				chrome.storage.local.set({ sExtFilterList: response.ext_list });
 			}
 		}
-	  })
-	  .catch((err) => {
-		console.error("[BitComet Native 通信错误] 无法与客户端建立连接: " + (err.message || err));
-	  });
+	});
 }
 
 /**
  * 调起比特彗星客户端主界面
  */
 function InvokeLaunchProgram() {
-	sendNativeMessageSafe({ action: "Launch_Program" })
-	  .then((response) => {
-		if (response && response.status !== "ok") {
+	chrome.runtime.sendNativeMessage(BITCOMET_NATIVE_HOST,
+	  { action: "Launch_Program" },
+	  function(response) {
+		if (chrome.runtime.lastError) {
+			console.error("LaunchProgram Error: " + chrome.runtime.lastError.message);
+		} else if (response && response.status !== "ok") {
 			console.error("LaunchProgram Failed: " + JSON.stringify(response));
 		}
-	  })
-	  .catch((err) => {
-		console.error("LaunchProgram Error: " + (err.message || err));
 	  });
 }
 
