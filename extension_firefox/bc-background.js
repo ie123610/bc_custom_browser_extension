@@ -1,7 +1,10 @@
-﻿// Chrome 插件
+﻿// Firefox / Chrome 双核兼容插件
 
 const BITCOMET_NATIVE_HOST = 'org.custom.bitcomet_bridge';
 const contextMenuId = "BitCometContextMenu";
+
+// 跨浏览器 API 命名空间兼容
+const extAPI = typeof browser !== 'undefined' ? browser : chrome;
 
 // 全局缓存配置状态
 const storageCache = {
@@ -31,7 +34,7 @@ CookieManager.prototype.getCookiesForUrls = function(
 
     // 1. 按传入的 URL 数组顺序独立收集 Cookie 结果
     for (var i = 0; i < urls.length; ++i) {
-        chrome.cookies.getAll(
+        extAPI.cookies.getAll(
             { 'url': urls[i] },
             function (index, cookies) {
                 rawResults[index] = cookies || [];
@@ -78,6 +81,31 @@ CookieManager.prototype.getCookiesForUrls = function(
 }
 
 /**
+ * 原生消息传递（Native Messaging）跨浏览器 Promise / Callback 兼容封装
+ */
+function sendNativeMessageCompat(host, payload) {
+    return new Promise((resolve) => {
+        try {
+            var p = extAPI.runtime.sendNativeMessage(host, payload, (response) => {
+                if (extAPI.runtime.lastError) {
+                    console.error("[Native Messaging] 通信错误:", extAPI.runtime.lastError.message);
+                    resolve({ error: extAPI.runtime.lastError });
+                } else {
+                    resolve({ response: response });
+                }
+            });
+            // 兼容 Firefox 原生返回 Promise 的调用方式
+            if (p && typeof p.then === 'function') {
+                p.then((res) => resolve({ response: res }))
+                 .catch((err) => resolve({ error: err }));
+            }
+        } catch (e) {
+            resolve({ error: e });
+        }
+    });
+}
+
+/**
  * 获取目标 URL Cookie 并透退给比特彗星 Native 宿主程序
  */
 function sendToBitComet(downloadItem) {
@@ -106,7 +134,7 @@ function sendToBitComet(downloadItem) {
         const payload = {
           action: "Download",
           link: finalUrl,
-          name: downloadItem.filename, // 传入 Chrome 解析出的精准文件名
+          name: downloadItem.filename, // 传入浏览器解析出的精准文件名
           cookie: cookieString,
           referurl: referrerUrl,
           user_agent: navigator.userAgent
@@ -115,15 +143,14 @@ function sendToBitComet(downloadItem) {
         console.log("-> 发送给 Native Host 的完整 Payload 数据:", JSON.stringify(payload, null, 2));
         console.groupEnd();
 
-        chrome.runtime.sendNativeMessage(BITCOMET_NATIVE_HOST, payload, (response) => {
-          // 1. 检查是否存在管道断开等通信级错误
-          if (chrome.runtime.lastError) {
-            console.error("[下载任务传递信息] 调用 Native Host 失败:", chrome.runtime.lastError.message);
+        sendNativeMessageCompat(BITCOMET_NATIVE_HOST, payload).then((res) => {
+          if (res.error) {
+            console.error("[下载任务传递信息] 调用 Native Host 失败:", res.error.message || res.error);
             resolve(false);
             return;
           }
 
-          // 2. 检查 Native Host 返回的业务状态
+          var response = res.response;
           if (response && response.status === "ok") {
             console.log("[下载任务传递信息] 比特彗星响应成功:", response);
             resolve(true);
@@ -137,20 +164,17 @@ function sendToBitComet(downloadItem) {
 }
 
 /**
- * 核心拦截：接管下载文件名确定事件，增加扩展名过滤比对机制
+ * 拦截核心处理逻辑
  */
-chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
-  // 读取插件使能状态及允许接管的扩展名配置列表
-  chrome.storage.local.get(["bPluginEnabled", "sExtFilterList"], (result) => {
+function handleDownloadIntercept(item, suggest) {
+  extAPI.storage.local.get(["bPluginEnabled", "sExtFilterList"], (result) => {
     const isEnabled = result.bPluginEnabled !== false; // 默认开启
 
-    // 1. 若插件被禁用，直接放行恢复原生下载
     if (!isEnabled) {
-      suggest({ filename: item.filename, conflictAction: 'uniquify' });
+      if (suggest) suggest({ filename: item.filename, conflictAction: 'uniquify' });
       return;
     }
 
-    // 2. 提取文件名扩展名并与从 Native Host 获取的配置进行比对校验
     const filename = item.filename || "";
     const extMatch = filename.match(/\.([a-zA-Z0-9]+)$/);
     const fileExt = extMatch ? extMatch[1].toLowerCase() : "";
@@ -163,54 +187,65 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
 
     const isMatch = fileExt && filterExtArray.includes(fileExt);
 
-    // 3. 未命中接管扩展名（如图片 .jpg/.png/.webp、文档 .pdf 等），或无法连接 Native Host 获取配置时，直接放行给浏览器下载
     if (!isMatch) {
       console.log(`[下载任务拦截] 文件名 "${filename}" 的扩展名 (.${fileExt}) 未在拦截列表中，放行交由浏览器原生下载。`);
-      suggest({ filename: item.filename, conflictAction: 'uniquify' });
+      if (suggest) suggest({ filename: item.filename, conflictAction: 'uniquify' });
       return;
     }
 
-    // 4. 命中拦截扩展名，推送到比特彗星
     console.log(`[下载任务拦截] 文件名 "${filename}" 匹配接管扩展名 (.${fileExt})，准备推送到比特彗星...`);
     sendToBitComet(item).then((success) => {
       if (success) {
-        // 推送成功：自动取消并清理浏览器端的原生下载任务
         try {
-          chrome.downloads.cancel(item.id, () => {
-            chrome.downloads.erase({ id: item.id });
+          extAPI.downloads.cancel(item.id, () => {
+            extAPI.downloads.erase({ id: item.id });
             console.log(`[下载任务传递信息] 已自动接管并清除内置下载 (ID: ${item.id})`);
           });
         } catch (err) {
           console.error("[下载任务传递信息] 取消下载任务失败:", err);
         }
       } else {
-        // 推送失败：降级回退交由浏览器原生下载
         console.warn("[下载任务传递信息] 调起比特彗星失败，回退为浏览器原生下载");
-        suggest({ filename: item.filename, conflictAction: 'uniquify' });
+        if (suggest) suggest({ filename: item.filename, conflictAction: 'uniquify' });
       }
     });
   });
+}
 
-  return true; // 保持异步回调机制
-});
+/**
+ * 核心拦截事件注册（跨浏览器兼容）
+ */
+if (extAPI.downloads.onDeterminingFilename) {
+  // Chrome / Edge 逻辑
+  extAPI.downloads.onDeterminingFilename.addListener((item, suggest) => {
+    handleDownloadIntercept(item, suggest);
+    return true;
+  });
+} else if (extAPI.downloads.onCreated) {
+  // Firefox 兼容逻辑
+  extAPI.downloads.onCreated.addListener((item) => {
+    handleDownloadIntercept(item, null);
+  });
+}
 
 /**
  * 设置插件开关状态，同步修改存储与图标 UI
  */
 function SetPluginEnabled(bEnabled) {
-	chrome.storage.local.set({ bPluginEnabled: bEnabled });
+	extAPI.storage.local.set({ bPluginEnabled: bEnabled });
 	UpdateBrowserActionIcon(bEnabled);
 }
 
 /**
- * 右键菜单点击处理逻辑：强制转化为 Chrome 原生下载任务，交由 onDeterminingFilename 事件捕获与解析文件名
+ * 右键菜单点击处理逻辑：强制转化为原生下载任务
  */
 function onStartupDownload(info, tab) {
 	let targetUrl = info.linkUrl || info.srcUrl || info.pageUrl;
 	let refererUrl = info.pageUrl || "";
 
-	if (info.pageUrl === "chrome://downloads/") {
-		chrome.downloads.search(
+	// 兼容 Chrome 的 chrome://downloads/ 与 Firefox 的 about:downloads
+	if (info.pageUrl === "chrome://downloads/" || info.pageUrl === "about:downloads") {
+		extAPI.downloads.search(
 			{ url: targetUrl, orderBy: ['-startTime'], limit: 1 },
 			function(data) {
 				if (data && data.length > 0) {
@@ -225,16 +260,16 @@ function onStartupDownload(info, tab) {
 }
 
 /**
- * 通过调用 chrome.downloads.download 强制唤醒下载流，利用 Chrome 完成 HTTP 预检和文件名提取
+ * 通过调用 extAPI.downloads.download 强制唤醒下载流
  */
 function ForceTriggerChromeDownload(link, refererUrl) {
 	console.log("[下载任务传递信息] 右键强制重定向为原生下载流程:", link);
-	chrome.downloads.download({
+	extAPI.downloads.download({
 		url: link,
 		saveAs: false
 	}, (downloadId) => {
-		if (chrome.runtime.lastError) {
-			console.error("[下载任务传递信息] 触发原生下载失败:", chrome.runtime.lastError.message);
+		if (extAPI.runtime.lastError) {
+			console.error("[下载任务传递信息] 触发原生下载失败:", extAPI.runtime.lastError.message);
 		} else {
 			console.log(`[下载任务传递信息] 成功触发临时原生下载任务 (ID: ${downloadId})，等待拦截管线捕获文件名...`);
 		}
@@ -245,17 +280,17 @@ function ForceTriggerChromeDownload(link, refererUrl) {
  * 获取客户端配置（例如比特彗星内部设定的扩展名列表）
  */
 function InvokeGetHostConfig() {
-	chrome.runtime.sendNativeMessage(BITCOMET_NATIVE_HOST,
-	  { action: "GetConfig" },
-	  async function(response) {
-		if (chrome.runtime.lastError) {
-			console.error("[BitComet Native 通信错误] 无法与客户端建立连接: " + chrome.runtime.lastError.message);
-		} else if (response) {
+	sendNativeMessageCompat(BITCOMET_NATIVE_HOST, { action: "GetConfig" }).then((res) => {
+		if (res.error) {
+			console.error("[BitComet Native 通信错误] 无法与客户端建立连接: " + (res.error.message || res.error));
+		} else if (res.response) {
+			var response = res.response;
 			console.log("Received Config: " + JSON.stringify(response));
-			let settingValues = await chrome.storage.local.get(["sExtFilterList"]);
-			if (typeof settingValues == 'undefined' || settingValues.sExtFilterList != response.ext_list) {
-				chrome.storage.local.set({ sExtFilterList: response.ext_list });
-			}
+			extAPI.storage.local.get(["sExtFilterList"], (settingValues) => {
+				if (typeof settingValues == 'undefined' || settingValues.sExtFilterList != response.ext_list) {
+					extAPI.storage.local.set({ sExtFilterList: response.ext_list });
+				}
+			});
 		}
 	});
 }
@@ -264,30 +299,28 @@ function InvokeGetHostConfig() {
  * 调起比特彗星客户端主界面
  */
 function InvokeLaunchProgram() {
-	chrome.runtime.sendNativeMessage(BITCOMET_NATIVE_HOST,
-	  { action: "Launch_Program" },
-	  function(response) {
-		if (chrome.runtime.lastError) {
-			console.error("LaunchProgram Error: " + chrome.runtime.lastError.message);
-		} else if (response && response.status !== "ok") {
-			console.error("LaunchProgram Failed: " + JSON.stringify(response));
+	sendNativeMessageCompat(BITCOMET_NATIVE_HOST, { action: "Launch_Program" }).then((res) => {
+		if (res.error) {
+			console.error("LaunchProgram Error: " + (res.error.message || res.error));
+		} else if (res.response && res.response.status !== "ok") {
+			console.error("LaunchProgram Failed: " + JSON.stringify(res.response));
 		}
-	  });
+	});
 }
 
 /**
  * 初始化右键菜单：支持链接、图片、音频和视频等多种右键场景
  */
 function CreateContextMenu() {
-	chrome.contextMenus.removeAll(function() {
-		chrome.contextMenus.create({
+	extAPI.contextMenus.removeAll(function() {
+		extAPI.contextMenus.create({
 			id: contextMenuId,
 			type: "normal",
-			title: chrome.i18n.getMessage("context_menu_title"),
+			title: extAPI.i18n.getMessage("context_menu_title"),
 			contexts: ["link", "image", "audio", "video"],
 			enabled: true
 		});
-		chrome.contextMenus.onClicked.addListener((info, tab) => {
+		extAPI.contextMenus.onClicked.addListener((info, tab) => {
 			if (info.menuItemId == contextMenuId) {
 				onStartupDownload(info, tab);
 			}
@@ -296,7 +329,7 @@ function CreateContextMenu() {
 }
 
 function UpdateContextMenuTitle(title) {
-	chrome.contextMenus.update(contextMenuId, { title: title });
+	extAPI.contextMenus.update(contextMenuId, { title: title });
 }
 
 /**
@@ -304,24 +337,30 @@ function UpdateContextMenuTitle(title) {
  */
 async function UpdateBrowserActionIcon(bPluginEnabled) {
 	if (bPluginEnabled == null) {
-		let settingValues = await chrome.storage.local.get(["bPluginEnabled"]);
-		bPluginEnabled = settingValues.bPluginEnabled !== false;
+		let settingValues = await new Promise((res) => extAPI.storage.local.get(["bPluginEnabled"], res));
+		bPluginEnabled = settingValues && settingValues.bPluginEnabled !== false;
 	}
 
 	var iconPath = bPluginEnabled ? "images/icon19_normal.png" : "images/icon19_disabled.png";
-	chrome.action.setIcon({ path: iconPath });
+	// 兼顾 Chrome MV3 (action) 与 Firefox / MV2 (browserAction)
+	const actionAPI = extAPI.action || extAPI.browserAction;
+	if (actionAPI && actionAPI.setIcon) {
+		actionAPI.setIcon({ path: iconPath });
+	}
 }
 
 /**
  * 注册与外部 UI（Popup 弹窗页面）通信的消息监听器
  */
 function RegisterEventListener() {
-	chrome.windows.onFocusChanged.addListener(function(windowId) {
-		if (chrome.windows.WINDOW_ID_NONE != windowId)
-			InvokeGetHostConfig();
-	});
+	if (extAPI.windows && extAPI.windows.onFocusChanged) {
+		extAPI.windows.onFocusChanged.addListener(function(windowId) {
+			if (extAPI.windows.WINDOW_ID_NONE != windowId)
+				InvokeGetHostConfig();
+		});
+	}
 
-	chrome.runtime.onMessage.addListener(function(message, sender, response) {
+	extAPI.runtime.onMessage.addListener(function(message, sender, response) {
 		if (message.name == "CaptureDownload") {
 			ForceTriggerChromeDownload(message.link, message.referurl);
 		} else if (message.name == "CheckHostConfig") {
@@ -333,16 +372,20 @@ function RegisterEventListener() {
 		} else if (message.name == "launchProgram") {
 			InvokeLaunchProgram();
 		}
-		response(true);
+		if (typeof response === 'function') {
+			response(true);
+		}
 	});
 }
 
 /**
  * 仅在插件首次安装/更新/加载时进行一次 Native 通信预检
  */
-chrome.runtime.onInstalled.addListener(() => {
-	InvokeGetHostConfig();
-});
+if (extAPI.runtime.onInstalled) {
+	extAPI.runtime.onInstalled.addListener(() => {
+		InvokeGetHostConfig();
+	});
+}
 
 function Init() {
 	CreateContextMenu();
