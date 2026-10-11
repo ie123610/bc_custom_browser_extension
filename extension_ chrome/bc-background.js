@@ -10,6 +10,24 @@ const storageCache = {
 };
 
 /**
+ * 检查 URL 是否符合跳过接管的特殊协议（如内存数据流、本地扩展、脚本等）
+ */
+function shouldSkipIntercept(url) {
+  if (!url) return true;
+
+  const skipProtocols = [
+    'blob:',
+    'data:',
+    'javascript:',
+    'chrome-extension:',
+    'moz-extension:',
+    'about:'
+  ];
+
+  return skipProtocols.some(protocol => url.startsWith(protocol));
+}
+
+/**
  * 移植自 Xdown 并升级为多源去重合并的 CookieManager
  */
 function CookieManager()
@@ -114,6 +132,14 @@ function sendToBitComet(downloadItem) {
  * 核心拦截：接管下载文件名确定事件，增加扩展名过滤比对机制
  */
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+  // 校验协议：若是 blob: / data: 等特殊协议，直接放行交由浏览器处理
+  const targetUrl = item.finalUrl || item.url || '';
+  if (shouldSkipIntercept(targetUrl)) {
+    console.log(`[下载任务拦截] 检测到特殊协议 URL "${targetUrl}"，直接放行交由浏览器处理。`);
+    suggest({ filename: item.filename, conflictAction: 'uniquify' });
+    return;
+  }
+
   // 读取插件使能状态及允许接管的扩展名配置列表
   chrome.storage.local.get(["bPluginEnabled", "sExtFilterList"], (result) => {
     const isEnabled = Boolean(result.bPluginEnabled); // 默认不开启（首次未设定时为 false）
