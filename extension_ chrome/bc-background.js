@@ -10,7 +10,7 @@ const storageCache = {
 };
 
 /**
- * 移植自 Xdown 并升级为多源去重、域优先及长度限制合并的 CookieManager
+ * 移植自 Xdown 并升级为多源去重合并的 CookieManager
  */
 function CookieManager()
 {
@@ -27,53 +27,27 @@ CookieManager.prototype.getCookiesForUrls = function(
     urls, callback)
 {
     var remained = urls.length;
-    var rawResults = new Array(urls.length);
+    var cookieMap = new Map();
 
-    // 1. 按传入的 URL 数组顺序独立收集 Cookie 结果
     for (var i = 0; i < urls.length; ++i) {
         chrome.cookies.getAll(
             { 'url': urls[i] },
-            function (index, cookies) {
-                rawResults[index] = cookies || [];
-                if (!--remained) {
-                    var cookieMap = new Map();
-
-                    // 2. 逆序合并（倒序遍历使优先级最高的域名/URL 后写入，从而覆盖低优先级的同名 Cookie）
-                    for (var j = rawResults.length - 1; j >= 0; --j) {
-                        var currentList = rawResults[j];
-                        for (var k = 0; k < currentList.length; ++k) {
-                            var c = currentList[k];
-                            if (c && c.name) {
-                                cookieMap.set(c.name, c.value);
-                            }
+            function (cookies) {
+                if (cookies) {
+                    cookies.forEach(function (c) {
+                        if (c && c.name) {
+                            cookieMap.set(c.name, c.value);
                         }
-                    }
-
-                    // 3. 构建 Cookie 键值对列表
+                    });
+                }
+                if (!--remained) {
                     var cookieList = Array.from(cookieMap.entries()).map(function (entry) {
                         return entry[0] + "=" + entry[1];
                     });
-
-                    // 4. 应用 Cookie 字符串安全长度上限限制（防止 HTTP 431 / Header Too Large）
-                    var MAX_COOKIE_LENGTH = 4096; // 设定 4KB 安全上限
-                    var resultList = [];
-                    var currentLength = 0;
-
-                    for (var m = 0; m < cookieList.length; ++m) {
-                        var item = cookieList[m];
-                        var itemLength = item.length + (resultList.length > 0 ? 2 : 0); // 包含 '; ' 分隔符长度
-                        if (currentLength + itemLength > MAX_COOKIE_LENGTH) {
-                            console.warn("[CookieManager] Cookie 总体积超过安全上限 (" + MAX_COOKIE_LENGTH + " B)，已安全截断后续字段。");
-                            break;
-                        }
-                        resultList.push(item);
-                        currentLength += itemLength;
-                    }
-
-                    var cookiesString = resultList.join('; ');
+                    var cookiesString = cookieList.join('; ');
                     callback([cookiesString]);
                 }
-            }.bind(this, i));
+            });
     }
 }
 
@@ -86,7 +60,7 @@ function sendToBitComet(downloadItem) {
     const finalUrl = downloadItem.finalUrl || downloadItem.url; // 优先取重定向后的终点地址
     const referrerUrl = downloadItem.referrer || '';
 
-    // 按优先级排列查询 Target URLs（下标 0 优先级最高：finalUrl -> originalUrl -> referrerUrl）
+    // 收集所有关联的 URL 来源（去重且排除空字符串）
     const targetUrls = Array.from(new Set([finalUrl, originalUrl, referrerUrl].filter(Boolean)));
 
     // 调试输出：打印当前下载任务的原始 URL 与最终重定向 URL
@@ -94,7 +68,7 @@ function sendToBitComet(downloadItem) {
     console.log("-> 原始请求 URL (originalUrl):", originalUrl);
     console.log("-> 重定向终点 URL (finalUrl):", finalUrl);
     console.log("-> 来源页面 (referrerUrl):", referrerUrl);
-    console.log("-> 收集到的所有 Cookie 查询 Target URLs (按优先级排列):", targetUrls);
+    console.log("-> 收集到的所有 Cookie 查询 Target URLs:", targetUrls);
 
     // 调用升级后的 CookieManager 获取多源合并后的 Cookie
     var cManager = new CookieManager();
