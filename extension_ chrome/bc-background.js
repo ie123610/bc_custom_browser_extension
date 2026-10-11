@@ -5,7 +5,7 @@ const contextMenuId = "BitCometContextMenu";
 
 // 全局缓存配置状态
 const storageCache = {
-	bPluginEnabled: true,
+	bPluginEnabled: false,
 	sExtFilterList: ""
 };
 
@@ -116,7 +116,7 @@ function sendToBitComet(downloadItem) {
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   // 读取插件使能状态及允许接管的扩展名配置列表
   chrome.storage.local.get(["bPluginEnabled", "sExtFilterList"], (result) => {
-    const isEnabled = result.bPluginEnabled !== false; // 默认开启
+    const isEnabled = Boolean(result.bPluginEnabled); // 默认不开启（首次未设定时为 false）
 
     // 1. 若插件被禁用，直接放行恢复原生下载
     if (!isEnabled) {
@@ -279,7 +279,7 @@ function UpdateContextMenuTitle(title) {
 async function UpdateBrowserActionIcon(bPluginEnabled) {
 	if (bPluginEnabled == null) {
 		let settingValues = await chrome.storage.local.get(["bPluginEnabled"]);
-		bPluginEnabled = settingValues.bPluginEnabled !== false;
+		bPluginEnabled = Boolean(settingValues.bPluginEnabled);
 	}
 
 	var iconPath = bPluginEnabled ? "images/icon19_normal.png" : "images/icon19_disabled.png";
@@ -312,9 +312,14 @@ function RegisterEventListener() {
 }
 
 /**
- * 仅在插件首次安装/更新/加载时进行一次 Native 通信预检
+ * 仅在插件首次安装/更新/加载时进行一次 Native 通信预检与默认状态初始化
  */
 chrome.runtime.onInstalled.addListener(() => {
+	chrome.storage.local.get(["bPluginEnabled"], (result) => {
+		if (typeof result.bPluginEnabled === 'undefined') {
+			chrome.storage.local.set({ bPluginEnabled: false });
+		}
+	});
 	InvokeGetHostConfig();
 });
 
