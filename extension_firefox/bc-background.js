@@ -1,10 +1,13 @@
-﻿// Firefox / Chrome 双核兼容插件
+﻿// Firefox 插件
 
 const BITCOMET_NATIVE_HOST = 'org.custom.bitcomet_bridge';
 const contextMenuId = "BitCometContextMenu";
 
 // 跨浏览器 API 命名空间兼容
 const extAPI = typeof browser !== 'undefined' ? browser : chrome;
+
+// 记录已处理或正在处理的下载 ID，防止重复捕获
+const processedDownloadIds = new Set();
 
 // 全局缓存配置状态
 const storageCache = {
@@ -13,7 +16,7 @@ const storageCache = {
 };
 
 /**
- * 移植自 Xdown 并升级为多源去重、域优先及长度限制合并的 CookieManager
+ * 移植自 Xdown 并升级为多源去重合并的 CookieManager
  */
 function CookieManager()
 {
@@ -30,53 +33,27 @@ CookieManager.prototype.getCookiesForUrls = function(
     urls, callback)
 {
     var remained = urls.length;
-    var rawResults = new Array(urls.length);
+    var cookieMap = new Map();
 
-    // 1. 按传入的 URL 数组顺序独立收集 Cookie 结果
     for (var i = 0; i < urls.length; ++i) {
         extAPI.cookies.getAll(
             { 'url': urls[i] },
-            function (index, cookies) {
-                rawResults[index] = cookies || [];
-                if (!--remained) {
-                    var cookieMap = new Map();
-
-                    // 2. 逆序合并（倒序遍历使优先级最高的域名/URL 后写入，从而覆盖低优先级的同名 Cookie）
-                    for (var j = rawResults.length - 1; j >= 0; --j) {
-                        var currentList = rawResults[j];
-                        for (var k = 0; k < currentList.length; ++k) {
-                            var c = currentList[k];
-                            if (c && c.name) {
-                                cookieMap.set(c.name, c.value);
-                            }
+            function (cookies) {
+                if (cookies) {
+                    cookies.forEach(function (c) {
+                        if (c && c.name) {
+                            cookieMap.set(c.name, c.value);
                         }
-                    }
-
-                    // 3. 构建 Cookie 键值对列表
+                    });
+                }
+                if (!--remained) {
                     var cookieList = Array.from(cookieMap.entries()).map(function (entry) {
                         return entry[0] + "=" + entry[1];
                     });
-
-                    // 4. 应用 Cookie 字符串安全长度上限限制（防止 HTTP 431 / Header Too Large）
-                    var MAX_COOKIE_LENGTH = 4096; // 设定 4KB 安全上限
-                    var resultList = [];
-                    var currentLength = 0;
-
-                    for (var m = 0; m < cookieList.length; ++m) {
-                        var item = cookieList[m];
-                        var itemLength = item.length + (resultList.length > 0 ? 2 : 0); // 包含 '; ' 分隔符长度
-                        if (currentLength + itemLength > MAX_COOKIE_LENGTH) {
-                            console.warn("[CookieManager] Cookie 总体积超过安全上限 (" + MAX_COOKIE_LENGTH + " B)，已安全截断后续字段。");
-                            break;
-                        }
-                        resultList.push(item);
-                        currentLength += itemLength;
-                    }
-
-                    var cookiesString = resultList.join('; ');
+                    var cookiesString = cookieList.join('; ');
                     callback([cookiesString]);
                 }
-            }.bind(this, i));
+            });
     }
 }
 
@@ -114,7 +91,11 @@ function sendToBitComet(downloadItem) {
     const finalUrl = downloadItem.finalUrl || downloadItem.url; // 优先取重定向后的终点地址
     const referrerUrl = downloadItem.referrer || '';
 
-    // 按优先级排列查询 Target URLs（下标 0 优先级最高：finalUrl -> originalUrl -> referrerUrl）
+    // 剥离可能包含的路径前缀（兼容 Windows '\' 与 Unix/Mac '/'），仅获取纯文件名
+    const rawFilename = downloadItem.filename || '';
+    const cleanFilename = rawFilename.replace(/^.*[\\/]/, '');
+
+    // 收集所有关联的 URL 来源（去重且排除空字符串）
     const targetUrls = Array.from(new Set([finalUrl, originalUrl, referrerUrl].filter(Boolean)));
 
     // 调试输出：打印当前下载任务的原始 URL 与最终重定向 URL
@@ -122,7 +103,7 @@ function sendToBitComet(downloadItem) {
     console.log("-> 原始请求 URL (originalUrl):", originalUrl);
     console.log("-> 重定向终点 URL (finalUrl):", finalUrl);
     console.log("-> 来源页面 (referrerUrl):", referrerUrl);
-    console.log("-> 收集到的所有 Cookie 查询 Target URLs (按优先级排列):", targetUrls);
+    console.log("-> 收集到的所有 Cookie 查询 Target URLs:", targetUrls);
 
     // 调用升级后的 CookieManager 获取多源合并后的 Cookie
     var cManager = new CookieManager();
@@ -134,7 +115,7 @@ function sendToBitComet(downloadItem) {
         const payload = {
           action: "Download",
           link: finalUrl,
-          name: downloadItem.filename, // 传入浏览器解析出的精准文件名
+          name: cleanFilename, // 传入剥离路径后的纯文件名
           cookie: cookieString,
           referurl: referrerUrl,
           user_agent: navigator.userAgent
@@ -164,9 +145,9 @@ function sendToBitComet(downloadItem) {
 }
 
 /**
- * 拦截核心处理逻辑
+ * Chrome / Edge 专属拦截处理函数
  */
-function handleDownloadIntercept(item, suggest) {
+function handleChromeDownloadIntercept(item, suggest) {
   extAPI.storage.local.get(["bPluginEnabled", "sExtFilterList"], (result) => {
     const isEnabled = result.bPluginEnabled !== false; // 默认开启
 
@@ -213,19 +194,184 @@ function handleDownloadIntercept(item, suggest) {
 }
 
 /**
- * 核心拦截事件注册（跨浏览器兼容）
+ * 辅助逻辑：校验文件名或 URL 的扩展名是否在拦截白名单中
+ */
+function isExtensionMatching(targetString, filterString) {
+  if (!targetString) {
+    console.log("  └─ [匹配检查] 待校验目标为空字符串，比对跳过。");
+    return false;
+  }
+  // 清理路径前缀和 URL 参数
+  const cleanStr = targetString.split('?')[0].split('#')[0].replace(/^.*[\\/]/, '');
+  const extMatch = cleanStr.match(/\.([a-zA-Z0-9]+)$/);
+  const fileExt = extMatch ? extMatch[1].toLowerCase() : "";
+
+  const filterExtArray = (filterString || "")
+    .toLowerCase()
+    .split(';')
+    .map(ext => ext.trim().replace(/^\./, ''))
+    .filter(Boolean);
+
+  const matched = Boolean(fileExt && filterExtArray.includes(fileExt));
+  console.log(`  └─ [匹配检查] 原始目标: "${targetString}" | 提取基名: "${cleanStr}" | 提取后缀: ".${fileExt}" | 拦截白名单: [${filterExtArray.join(', ')}] | 比对结果: ${matched}`);
+  return matched;
+}
+
+/**
+ * 通用执行接管推送到比特彗星的逻辑
+ */
+function executeFirefoxIntercept(item, label) {
+  if (processedDownloadIds.has(item.id)) {
+    console.log(`[${label}] 下载任务 ID: ${item.id} 已经在处理队列中，忽略重复唤醒。`);
+    return;
+  }
+  processedDownloadIds.add(item.id);
+
+  console.log(`[${label}] 命中接管扩展名，准备推送到比特彗星... (ID: ${item.id})`);
+  sendToBitComet(item).then((success) => {
+    if (success) {
+      try {
+        extAPI.downloads.cancel(item.id, () => {
+          extAPI.downloads.erase({ id: item.id });
+          console.log(`[${label}] 已自动接管并清除内置下载 (ID: ${item.id})`);
+        });
+      } catch (err) {
+        console.error(`[${label}] 取消下载任务失败:`, err);
+      }
+    } else {
+      console.warn(`[${label}] 调起比特彗星失败，放行恢复浏览器原生下载`);
+      processedDownloadIds.delete(item.id);
+    }
+  });
+}
+
+/**
+ * Firefox 专属：第一层 onCreated 快速拦截管线 (针对静态 URL 直链)
+ */
+function handleFirefoxOnCreated(item) {
+  console.group(`[Firefox 捕获管线] onCreated 事件触发 (Task ID: ${item.id})`);
+  console.log("-> 接收到的原始 DownloadItem:", item);
+
+  if (processedDownloadIds.has(item.id)) {
+    console.log("-> Task ID 已包含在 processedDownloadIds 集合中，跳过执行。");
+    console.groupEnd();
+    return;
+  }
+
+  extAPI.storage.local.get(["bPluginEnabled", "sExtFilterList"], (result) => {
+    const isEnabled = result.bPluginEnabled !== false;
+    console.log("-> 插件启用状态 (bPluginEnabled):", isEnabled);
+    console.log("-> 拦截扩展名白名单 (sExtFilterList):", result.sExtFilterList || "(为空)");
+
+    if (!isEnabled) {
+      console.log("-> 插件已被关闭，跳过拦截管线。");
+      console.groupEnd();
+      return;
+    }
+
+    const filterString = result.sExtFilterList || "";
+    const cleanFilename = (item.filename || "").replace(/^.*[\\/]/, '');
+
+    console.log("-> 开始比对 filename 扩展名...");
+    const fnMatched = isExtensionMatching(cleanFilename, filterString);
+    console.log("-> 开始比对 URL 扩展名...");
+    const urlMatched = isExtensionMatching(item.url, filterString);
+
+    if (fnMatched || urlMatched) {
+      console.log("-> onCreated 成功捕获静态任务，触发下载接管！");
+      console.groupEnd();
+      executeFirefoxIntercept(item, "Firefox onCreated 极速拦截");
+    } else {
+      console.log("-> onCreated 未能通过扩展名比对，等待 onChanged 阶段异步捕获。");
+      console.groupEnd();
+    }
+  });
+}
+
+/**
+ * Firefox 专属：第二层 onChanged 动态拦截管线 (针对重定向及动态生成文件名)
+ */
+function handleFirefoxOnChanged(delta) {
+  console.group(`[Firefox 捕获管线] onChanged 事件触发 (Task ID: ${delta.id})`);
+  console.log("-> 接收到的属性变动 Delta:", delta);
+
+  if (!delta.filename || !delta.filename.current) {
+    console.log("-> 本次 onChanged 不包含 filename 变更或 current 属性，忽略处理。");
+    console.groupEnd();
+    return;
+  }
+
+  if (processedDownloadIds.has(delta.id)) {
+    console.log("-> Task ID 已包含在 processedDownloadIds 集合中，忽略处理。");
+    console.groupEnd();
+    return;
+  }
+
+  extAPI.storage.local.get(["bPluginEnabled", "sExtFilterList"], (result) => {
+    const isEnabled = result.bPluginEnabled !== false;
+    console.log("-> 插件启用状态 (bPluginEnabled):", isEnabled);
+    console.log("-> 拦截扩展名白名单 (sExtFilterList):", result.sExtFilterList || "(为空)");
+
+    if (!isEnabled) {
+      console.log("-> 插件已被关闭，跳过拦截管线。");
+      console.groupEnd();
+      return;
+    }
+
+    const fullPath = delta.filename.current || "";
+    const cleanFilename = fullPath.replace(/^.*[\\/]/, '');
+    const filterString = result.sExtFilterList || "";
+
+    console.log("-> onChanged 解析到的最新 filename:", fullPath);
+    console.log("-> 开始比对 onChanged 文件名扩展名...");
+    const isMatched = isExtensionMatching(cleanFilename, filterString);
+
+    if (isMatched) {
+      console.log("-> onChanged 成功捕获变动文件名，查询完整的 DownloadItem 并准备接管...");
+      extAPI.downloads.search({ id: delta.id }, (items) => {
+        if (items && items.length > 0) {
+          console.groupEnd();
+          executeFirefoxIntercept(items[0], "Firefox onChanged 动态拦截");
+        } else {
+          console.warn("-> 未能检索到指定的 DownloadItem (ID:", delta.id, ")");
+          console.groupEnd();
+        }
+      });
+    } else {
+      console.log("-> onChanged 变动的文件名不在拦截白名单中，放行给 Firefox 原生下载。");
+      console.groupEnd();
+    }
+  });
+}
+
+/**
+ * 核心拦截事件注册（区分 Chrome 与 Firefox 专属拦截管线）
  */
 if (extAPI.downloads.onDeterminingFilename) {
-  // Chrome / Edge 逻辑
+  console.log("[系统初始化] 检测到支持 onDeterminingFilename API，已注册 Chrome/Edge 拦截管线。");
   extAPI.downloads.onDeterminingFilename.addListener((item, suggest) => {
-    handleDownloadIntercept(item, suggest);
+    handleChromeDownloadIntercept(item, suggest);
     return true;
   });
-} else if (extAPI.downloads.onCreated) {
-  // Firefox 兼容逻辑
-  extAPI.downloads.onCreated.addListener((item) => {
-    handleDownloadIntercept(item, null);
-  });
+} else {
+  console.log("[系统初始化] 未检测到 onDeterminingFilename API，准备注册 Firefox 双层拦截管线 (onCreated + onChanged)...");
+  if (extAPI.downloads.onCreated) {
+    console.log("[系统初始化] 已注册 extAPI.downloads.onCreated 监听器。");
+    extAPI.downloads.onCreated.addListener((item) => {
+      handleFirefoxOnCreated(item);
+    });
+  } else {
+    console.warn("[系统初始化] 警告: 当前环境不支持 extAPI.downloads.onCreated !");
+  }
+
+  if (extAPI.downloads.onChanged) {
+    console.log("[系统初始化] 已注册 extAPI.downloads.onChanged 监听器。");
+    extAPI.downloads.onChanged.addListener((delta) => {
+      handleFirefoxOnChanged(delta);
+    });
+  } else {
+    console.warn("[系统初始化] 警告: 当前环境不支持 extAPI.downloads.onChanged !");
+  }
 }
 
 /**
