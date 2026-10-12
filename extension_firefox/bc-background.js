@@ -9,6 +9,12 @@ const extAPI = typeof browser !== 'undefined' ? browser : chrome;
 // 记录已处理或正在处理的下载 ID，防止 onCreated / onChanged 重复触发
 const processedDownloadIds = new Set();
 
+// Native Host 可用性预检标志
+// null  = 尚未探测，按"可能可用"处理
+// true  = 最近一次通信成功
+// false = 最近一次通信失败，拦截前会跳过，保留浏览器原生下载
+let nativeHostAvailable = null;
+
 // 全局缓存配置状态
 const storageCache = {
 	bPluginEnabled: false,
@@ -113,6 +119,10 @@ function sendToBitComet(downloadItem) {
     const finalUrl = downloadItem.finalUrl || downloadItem.url; // 优先取重定向后的终点地址
     const referrerUrl = downloadItem.referrer || '';
 
+    // Firefox 的 downloadItem.filename 通常包含完整保存路径，需要清理为纯文件名
+    const rawFilename = downloadItem.filename || '';
+    const cleanFilename = rawFilename.replace(/^.*[\\/]/, '');
+
     // 只取最终下载 URL 的 Cookie，避免跨域合并导致鉴权错误
     const targetUrls = [finalUrl || originalUrl].filter(Boolean);
 
@@ -121,6 +131,7 @@ function sendToBitComet(downloadItem) {
     console.log("-> 原始请求 URL (originalUrl):", originalUrl);
     console.log("-> 重定向终点 URL (finalUrl):", finalUrl);
     console.log("-> 来源页面 (referrerUrl):", referrerUrl);
+    console.log("-> 清理后的文件名 (cleanFilename):", cleanFilename);
     console.log("-> Cookie 查询 Target URL:", targetUrls[0] || "(无)");
 
     // 调用 CookieManager 获取最终下载 URL 的 Cookie
@@ -133,7 +144,7 @@ function sendToBitComet(downloadItem) {
         const payload = {
           action: "Download",
           link: finalUrl,
-          name: downloadItem.filename, // 传入浏览器解析出的精准文件名
+          name: cleanFilename, // 传入清理后的纯文件名
           cookie: cookieString,
           referurl: referrerUrl,
           user_agent: navigator.userAgent
@@ -145,6 +156,8 @@ function sendToBitComet(downloadItem) {
         sendNativeMessageCompat(BITCOMET_NATIVE_HOST, payload).then((res) => {
           if (res.error) {
             console.error("[下载任务传递信息] 调用 Native Host 失败:", res.error.message || res.error);
+            // 更新预检标志，后续拦截将跳过
+            nativeHostAvailable = false;
             resolve(false);
             return;
           }
@@ -152,9 +165,13 @@ function sendToBitComet(downloadItem) {
           var response = res.response;
           if (response && response.status === "ok") {
             console.log("[下载任务传递信息] 比特彗星响应成功:", response);
+            // 通信成功，更新预检标志
+            nativeHostAvailable = true;
             resolve(true);
           } else {
             console.error("[下载任务传递信息] 比特彗星响应错误，详细原因:", response ? response.message : "未知响应格式");
+            // 管道通了但业务失败，不算 Host 不可用
+            nativeHostAvailable = true;
             resolve(false);
           }
         });
@@ -183,26 +200,42 @@ function checkExtensionMatch(text, filterString) {
 
 /**
  * 执行接管推送到比特彗星并销毁浏览器内置任务
+ * 采用"先取消、后发送"顺序，把浏览器下载 UI 的可见窗口压到最小
+ * 发送前先检查 nativeHostAvailable 预检标志，明确不可用时直接放行浏览器原生下载
  */
 function executeFirefoxIntercept(item) {
   if (processedDownloadIds.has(item.id)) return;
   processedDownloadIds.add(item.id);
 
-  sendToBitComet(item).then((success) => {
-    if (success) {
-      try {
-        extAPI.downloads.cancel(item.id, () => {
-          extAPI.downloads.erase({ id: item.id });
-          console.log(`[下载任务传递信息] 已自动接管并清除内置下载 (ID: ${item.id})`);
-        });
-      } catch (err) {
-        console.error("[下载任务传递信息] 取消下载任务失败:", err);
-      }
-    } else {
-      console.warn("[下载任务传递信息] 调起比特彗星失败，回退为浏览器原生下载");
-      processedDownloadIds.delete(item.id);
-    }
-  });
+  // 预检：Native Host 已知不可用时，放弃拦截，保留浏览器原生下载
+  if (nativeHostAvailable === false) {
+    console.warn("[下载任务传递信息] Native Host 预检标记为不可用，跳过拦截，保留浏览器原生下载");
+    processedDownloadIds.delete(item.id);
+    return;
+  }
+
+  // 先取消浏览器下载，压缩 UI 闪烁窗口
+  try {
+    extAPI.downloads.cancel(item.id, () => {
+      extAPI.downloads.erase({ id: item.id });
+      console.log(`[下载任务传递信息] 已取消内置下载 (ID: ${item.id})，开始发送到比特彗星...`);
+
+      // 取消成功后再异步发送给比特彗星
+      sendToBitComet(item).then((success) => {
+        if (success) {
+          console.log("[下载任务传递信息] 比特彗星接管成功");
+        } else {
+          // 此时浏览器下载已被取消，无法恢复；仅记录日志，更新预检标志
+          console.warn("[下载任务传递信息] 调起比特彗星失败，但浏览器下载已取消，用户需重新触发下载");
+          processedDownloadIds.delete(item.id);
+        }
+      });
+    });
+  } catch (err) {
+    console.error("[下载任务传递信息] 取消下载任务失败:", err);
+    // 取消失败，说明下载可能仍在继续，回退为浏览器原生下载
+    processedDownloadIds.delete(item.id);
+  }
 }
 
 /**
@@ -330,14 +363,17 @@ function ForceTriggerDownload(link, refererUrl) {
 
 /**
  * 获取客户端配置（例如比特彗星内部设定的扩展名列表）
+ * 同时刷新 nativeHostAvailable 预检标志
  */
 function InvokeGetHostConfig() {
 	sendNativeMessageCompat(BITCOMET_NATIVE_HOST, { action: "GetConfig" }).then((res) => {
 		if (res.error) {
 			console.error("[BitComet Native 通信错误] 无法与客户端建立连接: " + (res.error.message || res.error));
+			nativeHostAvailable = false;
 		} else if (res.response) {
 			var response = res.response;
 			console.log("Received Config: " + JSON.stringify(response));
+			nativeHostAvailable = true;
 			extAPI.storage.local.get(["sExtFilterList"], (settingValues) => {
 				if (typeof settingValues == 'undefined' || settingValues.sExtFilterList != response.ext_list) {
 					extAPI.storage.local.set({ sExtFilterList: response.ext_list });
@@ -354,8 +390,11 @@ function InvokeLaunchProgram() {
 	sendNativeMessageCompat(BITCOMET_NATIVE_HOST, { action: "Launch_Program" }).then((res) => {
 		if (res.error) {
 			console.error("LaunchProgram Error: " + (res.error.message || res.error));
+			nativeHostAvailable = false;
 		} else if (res.response && res.response.status !== "ok") {
 			console.error("LaunchProgram Failed: " + JSON.stringify(res.response));
+		} else {
+			nativeHostAvailable = true;
 		}
 	});
 }
@@ -448,6 +487,8 @@ function Init() {
 	CreateContextMenu();
 	UpdateBrowserActionIcon();
 	RegisterEventListener();
+	// 启动时立即做一次预检，让 nativeHostAvailable 尽早有值
+	InvokeGetHostConfig();
 }
 
 Init();
