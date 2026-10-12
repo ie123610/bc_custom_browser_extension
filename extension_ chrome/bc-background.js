@@ -78,17 +78,17 @@ function sendToBitComet(downloadItem) {
     const finalUrl = downloadItem.finalUrl || downloadItem.url; // 优先取重定向后的终点地址
     const referrerUrl = downloadItem.referrer || '';
 
-    // 收集所有关联的 URL 来源（去重且排除空字符串）
-    const targetUrls = Array.from(new Set([finalUrl, originalUrl, referrerUrl].filter(Boolean)));
+    // 只取最终下载 URL 的 Cookie，避免跨域合并导致鉴权错误
+    const targetUrls = [finalUrl || originalUrl].filter(Boolean);
 
     // 调试输出：打印当前下载任务的原始 URL 与最终重定向 URL
     console.group("[下载任务传递信息]");
     console.log("-> 原始请求 URL (originalUrl):", originalUrl);
     console.log("-> 重定向终点 URL (finalUrl):", finalUrl);
     console.log("-> 来源页面 (referrerUrl):", referrerUrl);
-    console.log("-> 收集到的所有 Cookie 查询 Target URLs:", targetUrls);
+    console.log("-> Cookie 查询 Target URL:", targetUrls[0] || "(无)");
 
-    // 调用升级后的 CookieManager 获取多源合并后的 Cookie
+    // 调用 CookieManager 获取最终下载 URL 的 Cookie
     var cManager = new CookieManager();
     cManager.getCookiesForUrls(targetUrls, function (results) {
         const cookieString = (results && results[0]) || '';
