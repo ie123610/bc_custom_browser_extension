@@ -6,17 +6,36 @@ const contextMenuId = "BitCometContextMenu";
 // 跨浏览器 API 命名空间兼容
 const extAPI = typeof browser !== 'undefined' ? browser : chrome;
 
-// 记录已处理或正在处理的下载 ID，防止重复捕获
+// 记录已处理或正在处理的下载 ID，防止 onCreated / onChanged 重复触发
 const processedDownloadIds = new Set();
 
 // 全局缓存配置状态
 const storageCache = {
-	bPluginEnabled: true,
+	bPluginEnabled: false,
 	sExtFilterList: ""
 };
 
 /**
- * 移植自 Xdown 并升级为多源去重合并的 CookieManager
+ * 检查 URL 是否符合跳过接管的特殊协议（如内存数据流、本地扩展、脚本等）
+ */
+function shouldSkipIntercept(url) {
+  if (!url) return true;
+
+  const skipProtocols = [
+    'blob:',
+    'data:',
+    'javascript:',
+    'chrome-extension:',
+    'moz-extension:',
+    'about:'
+  ];
+
+  return skipProtocols.some(protocol => url.startsWith(protocol));
+}
+
+/**
+ * 移植自 Xdown 的 CookieManager
+ * 保留浏览器返回的全部 Cookie，不按名称去重
  */
 function CookieManager()
 {
@@ -32,33 +51,37 @@ CookieManager.prototype.getCookiesForUrl = function(url, callback)
 CookieManager.prototype.getCookiesForUrls = function(
     urls, callback)
 {
+    // 空数组保护：立即回调空字符串，避免 Promise 永远 pending
+    if (!urls || urls.length === 0) {
+        callback(['']);
+        return;
+    }
+
     var remained = urls.length;
-    var cookieMap = new Map();
+    var result = [];
 
     for (var i = 0; i < urls.length; ++i) {
         extAPI.cookies.getAll(
             { 'url': urls[i] },
-            function (cookies) {
+            function (resultIndex, cookies) {
+                var cookiesString = "";
                 if (cookies) {
-                    cookies.forEach(function (c) {
-                        if (c && c.name) {
-                            cookieMap.set(c.name, c.value);
-                        }
-                    });
+                    // 直接保留浏览器返回的全部 Cookie，不按名称去重
+                    cookiesString = cookies.map(function (cookie) {
+                        return cookie.name + "=" + cookie.value;
+                    }).join('; ');
                 }
+                result[resultIndex] = cookiesString;
                 if (!--remained) {
-                    var cookieList = Array.from(cookieMap.entries()).map(function (entry) {
-                        return entry[0] + "=" + entry[1];
-                    });
-                    var cookiesString = cookieList.join('; ');
-                    callback([cookiesString]);
+                    callback(result);
                 }
-            });
+            }.bind(this, i));
     }
 }
 
 /**
  * 原生消息传递（Native Messaging）封装
+ * 兼容 Firefox 的 Promise 风格与 Chrome 的回调风格
  */
 function sendNativeMessageCompat(host, payload) {
     return new Promise((resolve) => {
@@ -87,21 +110,20 @@ function sendNativeMessageCompat(host, payload) {
 function sendToBitComet(downloadItem) {
   return new Promise((resolve) => {
     const originalUrl = downloadItem.url || '';
-    const finalUrl = downloadItem.finalUrl || downloadItem.url;
+    const finalUrl = downloadItem.finalUrl || downloadItem.url; // 优先取重定向后的终点地址
     const referrerUrl = downloadItem.referrer || '';
 
-    const rawFilename = downloadItem.filename || '';
-    const cleanFilename = rawFilename.replace(/^.*[\\/]/, '');
-
-    const targetUrls = Array.from(new Set([finalUrl, originalUrl, referrerUrl].filter(Boolean)));
+    // 只取最终下载 URL 的 Cookie，避免跨域合并导致鉴权错误
+    const targetUrls = [finalUrl || originalUrl].filter(Boolean);
 
     // 调试输出：打印当前下载任务的原始 URL 与最终重定向 URL
     console.group("[下载任务传递信息]");
     console.log("-> 原始请求 URL (originalUrl):", originalUrl);
     console.log("-> 重定向终点 URL (finalUrl):", finalUrl);
     console.log("-> 来源页面 (referrerUrl):", referrerUrl);
-    console.log("-> 收集到的所有 Cookie 查询 Target URLs:", targetUrls);
+    console.log("-> Cookie 查询 Target URL:", targetUrls[0] || "(无)");
 
+    // 调用 CookieManager 获取最终下载 URL 的 Cookie
     var cManager = new CookieManager();
     cManager.getCookiesForUrls(targetUrls, function (results) {
         const cookieString = (results && results[0]) || '';
@@ -111,7 +133,7 @@ function sendToBitComet(downloadItem) {
         const payload = {
           action: "Download",
           link: finalUrl,
-          name: cleanFilename,
+          name: downloadItem.filename, // 传入浏览器解析出的精准文件名
           cookie: cookieString,
           referurl: referrerUrl,
           user_agent: navigator.userAgent
@@ -141,12 +163,12 @@ function sendToBitComet(downloadItem) {
 }
 
 /**
- * 辅助逻辑：校验文件名或 URL 的扩展名是否在拦截白名单中
+ * 读取配置并判断给定文本（文件名或 URL）的扩展名是否在拦截白名单中
  */
-function isExtensionMatching(targetString, filterString) {
-  if (!targetString) return false;
+function checkExtensionMatch(text, filterString) {
+  if (!text) return false;
 
-  const cleanStr = targetString.split('?')[0].split('#')[0].replace(/^.*[\\/]/, '');
+  const cleanStr = text.split('?')[0].split('#')[0].replace(/^.*[\\/]/, '');
   const extMatch = cleanStr.match(/\.([a-zA-Z0-9]+)$/);
   const fileExt = extMatch ? extMatch[1].toLowerCase() : "";
 
@@ -171,60 +193,81 @@ function executeFirefoxIntercept(item) {
       try {
         extAPI.downloads.cancel(item.id, () => {
           extAPI.downloads.erase({ id: item.id });
+          console.log(`[下载任务传递信息] 已自动接管并清除内置下载 (ID: ${item.id})`);
         });
       } catch (err) {
-        console.error("取消下载任务失败:", err);
+        console.error("[下载任务传递信息] 取消下载任务失败:", err);
       }
     } else {
+      console.warn("[下载任务传递信息] 调起比特彗星失败，回退为浏览器原生下载");
       processedDownloadIds.delete(item.id);
     }
   });
 }
 
 /**
- * 第一层 onCreated 快速拦截管线 (针对静态 URL 直链)
+ * 第一层 onCreated 快速拦截管线
+ * 优先从文件名判断扩展名，文件名不完整时回退到 URL
  */
 function handleFirefoxOnCreated(item) {
   if (processedDownloadIds.has(item.id)) return;
 
+  const targetUrl = item.finalUrl || item.url || '';
+  if (shouldSkipIntercept(targetUrl)) {
+    console.log(`[下载任务拦截] 检测到特殊协议 URL "${targetUrl}"，直接放行交由浏览器处理。`);
+    return;
+  }
+
   extAPI.storage.local.get(["bPluginEnabled", "sExtFilterList"], (result) => {
-    const isEnabled = result.bPluginEnabled !== false;
+    const isEnabled = Boolean(result.bPluginEnabled);
     if (!isEnabled) return;
 
     const filterString = result.sExtFilterList || "";
-    const cleanFilename = (item.filename || "").replace(/^.*[\\/]/, '');
 
-    const fnMatched = isExtensionMatching(cleanFilename, filterString);
-    const urlMatched = isExtensionMatching(item.url, filterString);
+    // 第一优先：文件名
+    const filename = item.filename || "";
+    let isMatch = checkExtensionMatch(filename, filterString);
 
-    if (fnMatched || urlMatched) {
-      executeFirefoxIntercept(item);
+    // 第二优先：URL
+    if (!isMatch) {
+      isMatch = checkExtensionMatch(item.url, filterString);
     }
+
+    if (!isMatch) {
+      console.log(`[下载任务拦截] onCreated 未命中扩展名白名单，等待 onChanged 进一步判断。文件名="${filename}"`);
+      return;
+    }
+
+    console.log(`[下载任务拦截] onCreated 命中扩展名白名单，准备推送到比特彗星...`);
+    executeFirefoxIntercept(item);
   });
 }
 
 /**
- * 第二层 onChanged 动态拦截管线 (针对重定向及动态生成文件名)
+ * 第二层 onChanged 动态拦截管线
+ * 针对重定向及动态生成文件名的场景
  */
 function handleFirefoxOnChanged(delta) {
-  if (!delta.filename || !delta.filename.current) return;
   if (processedDownloadIds.has(delta.id)) return;
+  if (!delta.filename || !delta.filename.current) return;
+
+  const fullPath = delta.filename.current || "";
+  const cleanFilename = fullPath.replace(/^.*[\\/]/, '');
 
   extAPI.storage.local.get(["bPluginEnabled", "sExtFilterList"], (result) => {
-    const isEnabled = result.bPluginEnabled !== false;
+    const isEnabled = Boolean(result.bPluginEnabled);
     if (!isEnabled) return;
 
-    const fullPath = delta.filename.current || "";
-    const cleanFilename = fullPath.replace(/^.*[\\/]/, '');
     const filterString = result.sExtFilterList || "";
+    if (!checkExtensionMatch(cleanFilename, filterString)) return;
 
-    if (isExtensionMatching(cleanFilename, filterString)) {
-      extAPI.downloads.search({ id: delta.id }, (items) => {
-        if (items && items.length > 0) {
-          executeFirefoxIntercept(items[0]);
-        }
-      });
-    }
+    console.log(`[下载任务拦截] onChanged 命中扩展名白名单 (文件名="${cleanFilename}")，准备推送到比特彗星...`);
+
+    extAPI.downloads.search({ id: delta.id }, (items) => {
+      if (items && items.length > 0) {
+        executeFirefoxIntercept(items[0]);
+      }
+    });
   });
 }
 
@@ -247,56 +290,41 @@ function SetPluginEnabled(bEnabled) {
 }
 
 /**
- * 右键菜单点击处理逻辑：强制转化为原生下载任务
+ * 右键菜单点击处理逻辑：强制转化为浏览器原生下载任务，交由拦截管线解析文件名
  */
 function onStartupDownload(info, tab) {
 	let targetUrl = info.linkUrl || info.srcUrl || info.pageUrl;
 	let refererUrl = info.pageUrl || "";
 
-	console.group("[右键下载管线] 触发右键下载");
-	console.log("-> 提取到的目标 URL (targetUrl):", targetUrl);
-	console.log("-> 当前页面来源 URL (refererUrl):", refererUrl);
-	console.log("-> 原始 onClicked info 对象:", info);
-
 	if (info.pageUrl === "about:downloads") {
-		console.log("-> 检测到在 about:downloads 页面触发，尝试检索历史关联 Referrer...");
 		extAPI.downloads.search(
 			{ url: targetUrl, orderBy: ['-startTime'], limit: 1 },
 			function(data) {
 				if (data && data.length > 0) {
 					refererUrl = data[0].referrer || refererUrl;
-					console.log("-> 从下载历史中补全获得的 Referrer:", refererUrl);
-				} else {
-					console.log("-> 未在下载历史中检索到匹配项目，维持默认 Referer");
 				}
-				console.groupEnd();
 				ForceTriggerDownload(targetUrl, refererUrl);
 			}
 		);
 	} else {
-		console.groupEnd();
 		ForceTriggerDownload(targetUrl, refererUrl);
 	}
 }
 
 /**
- * 强制唤醒原生下载流
+ * 通过调用 downloads.download 强制唤醒下载流，利用浏览器完成 HTTP 预检和文件名提取
  */
 function ForceTriggerDownload(link, refererUrl) {
-	console.group("[右键下载管线] 唤醒原生 downloads.download");
-	console.log("-> 请求 URL:", link);
-	console.log("-> 关联 Referer:", refererUrl || "(无)");
-
+	console.log("[下载任务传递信息] 右键强制重定向为原生下载流程:", link);
 	extAPI.downloads.download({
 		url: link,
 		saveAs: false
 	}, (downloadId) => {
 		if (extAPI.runtime.lastError) {
-			console.error("-> 触发原生下载失败:", extAPI.runtime.lastError.message);
+			console.error("[下载任务传递信息] 触发原生下载失败:", extAPI.runtime.lastError.message);
 		} else {
-			console.log(`-> 成功触发原生下载任务 (Task ID: ${downloadId})，等待 onCreated/onChanged 拦截管线接管...`);
+			console.log(`[下载任务传递信息] 成功触发临时原生下载任务 (ID: ${downloadId})，等待拦截管线捕获文件名...`);
 		}
-		console.groupEnd();
 	});
 }
 
@@ -333,7 +361,7 @@ function InvokeLaunchProgram() {
 }
 
 /**
- * 初始化右键菜单
+ * 初始化右键菜单：支持链接、图片、音频和视频等多种右键场景
  */
 function CreateContextMenu() {
 	extAPI.contextMenus.removeAll(function() {
@@ -357,12 +385,12 @@ function UpdateContextMenuTitle(title) {
 }
 
 /**
- * 切换工具栏图标显示
+ * 根据插件开/关状态动态切换工具栏上的显示图标
  */
 async function UpdateBrowserActionIcon(bPluginEnabled) {
 	if (bPluginEnabled == null) {
 		let settingValues = await new Promise((res) => extAPI.storage.local.get(["bPluginEnabled"], res));
-		bPluginEnabled = settingValues && settingValues.bPluginEnabled !== false;
+		bPluginEnabled = Boolean(settingValues && settingValues.bPluginEnabled);
 	}
 
 	var iconPath = bPluginEnabled ? "images/icon19_normal.png" : "images/icon19_disabled.png";
@@ -373,7 +401,7 @@ async function UpdateBrowserActionIcon(bPluginEnabled) {
 }
 
 /**
- * 注册与外部 UI 通信的消息监听器
+ * 注册与外部 UI（Popup 弹窗页面）通信的消息监听器
  */
 function RegisterEventListener() {
 	if (extAPI.windows && extAPI.windows.onFocusChanged) {
@@ -398,11 +426,20 @@ function RegisterEventListener() {
 		if (typeof response === 'function') {
 			response(true);
 		}
+		return true;
 	});
 }
 
+/**
+ * 仅在插件首次安装/更新/加载时进行一次 Native 通信预检与默认状态初始化
+ */
 if (extAPI.runtime.onInstalled) {
 	extAPI.runtime.onInstalled.addListener(() => {
+		extAPI.storage.local.get(["bPluginEnabled"], (result) => {
+			if (typeof result.bPluginEnabled === 'undefined') {
+				extAPI.storage.local.set({ bPluginEnabled: false });
+			}
+		});
 		InvokeGetHostConfig();
 	});
 }
