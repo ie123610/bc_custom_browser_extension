@@ -208,7 +208,7 @@ function SetPluginEnabled(bEnabled) {
 }
 
 /**
- * 右键菜单点击处理逻辑：强制转化为 Chrome 原生下载任务，交由 onDeterminingFilename 事件捕获与解析文件名
+ * 右键菜单点击处理逻辑：通过内容脚本模拟原生 <a> 点击，携带正确的 Referer 与 Cookie
  */
 function onStartupDownload(info, tab) {
 	let targetUrl = info.linkUrl || info.srcUrl || info.pageUrl;
@@ -221,29 +221,62 @@ function onStartupDownload(info, tab) {
 				if (data && data.length > 0) {
 					refererUrl = data[0].referrer || refererUrl;
 				}
-				ForceTriggerChromeDownload(targetUrl, refererUrl);
+				ForceTriggerChromeDownload(targetUrl, refererUrl, tab ? tab.id : null);
 			}
 		);
 	} else {
-		ForceTriggerChromeDownload(targetUrl, refererUrl);
+		ForceTriggerChromeDownload(targetUrl, refererUrl, tab ? tab.id : null);
 	}
 }
 
 /**
- * 通过调用 chrome.downloads.download 强制唤醒下载流，利用 Chrome 完成 HTTP 预检和文件名提取
+ * 通过内容脚本在页面上下文中创建并点击 <a> 元素，触发浏览器原生下载。
+ * 若内容脚本注入失败，则回退到 chrome.downloads.download。
  */
-function ForceTriggerChromeDownload(link, refererUrl) {
+function ForceTriggerChromeDownload(link, refererUrl, tabId) {
 	console.log("[下载任务传递信息] 右键强制重定向为原生下载流程:", link);
-	chrome.downloads.download({
-		url: link,
-		saveAs: false
-	}, (downloadId) => {
-		if (chrome.runtime.lastError) {
-			console.error("[下载任务传递信息] 触发原生下载失败:", chrome.runtime.lastError.message);
-		} else {
-			console.log(`[下载任务传递信息] 成功触发临时原生下载任务 (ID: ${downloadId})，等待拦截管线捕获文件名...`);
-		}
-	});
+	
+	// 优先尝试通过内容脚本模拟 <a> 点击，以携带正确的 Referer 和 Cookie
+	if (tabId && chrome.scripting && chrome.scripting.executeScript) {
+		chrome.scripting.executeScript({
+			target: { tabId: tabId },
+			func: (url) => {
+				const a = document.createElement('a');
+				a.href = url;
+				a.download = '';
+				a.click();
+			},
+			args: [link]
+		}).then(() => {
+			console.log("[下载任务传递信息] 已通过内容脚本触发原生下载，等待拦截管线捕获文件名...");
+		}).catch((err) => {
+			console.error("[下载任务传递信息] 内容脚本注入失败，回退到 downloads.download:", err);
+			// 回退到原有方案
+			chrome.downloads.download({
+				url: link,
+				saveAs: false
+			}, (downloadId) => {
+				if (chrome.runtime.lastError) {
+					console.error("[下载任务传递信息] 触发原生下载失败:", chrome.runtime.lastError.message);
+				} else {
+					console.log(`[下载任务传递信息] 成功触发临时原生下载任务 (ID: ${downloadId})，等待拦截管线捕获文件名...`);
+				}
+			});
+		});
+	} else {
+		// chrome.scripting 不可用，直接回退
+		console.warn("[下载任务传递信息] chrome.scripting 不可用，回退到 downloads.download");
+		chrome.downloads.download({
+			url: link,
+			saveAs: false
+		}, (downloadId) => {
+			if (chrome.runtime.lastError) {
+				console.error("[下载任务传递信息] 触发原生下载失败:", chrome.runtime.lastError.message);
+			} else {
+				console.log(`[下载任务传递信息] 成功触发临时原生下载任务 (ID: ${downloadId})，等待拦截管线捕获文件名...`);
+			}
+		});
+	}
 }
 
 /**
