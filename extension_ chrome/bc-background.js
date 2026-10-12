@@ -28,7 +28,8 @@ function shouldSkipIntercept(url) {
 }
 
 /**
- * 移植自 Xdown 并升级为多源去重合并的 CookieManager
+ * 移植自 Xdown 的 CookieManager
+ * 保留浏览器返回的全部 Cookie，不按名称去重
  */
 function CookieManager()
 {
@@ -44,28 +45,31 @@ CookieManager.prototype.getCookiesForUrl = function(url, callback)
 CookieManager.prototype.getCookiesForUrls = function(
     urls, callback)
 {
+    // 空数组保护：立即回调空字符串，避免 Promise 永远 pending
+    if (!urls || urls.length === 0) {
+        callback(['']);
+        return;
+    }
+
     var remained = urls.length;
-    var cookieMap = new Map();
+    var result = [];
 
     for (var i = 0; i < urls.length; ++i) {
         chrome.cookies.getAll(
             { 'url': urls[i] },
-            function (cookies) {
+            function (resultIndex, cookies) {
+                var cookiesString = "";
                 if (cookies) {
-                    cookies.forEach(function (c) {
-                        if (c && c.name) {
-                            cookieMap.set(c.name, c.value);
-                        }
-                    });
+                    // 直接保留浏览器返回的全部 Cookie，不按名称去重
+                    cookiesString = cookies.map(function (cookie) {
+                        return cookie.name + "=" + cookie.value;
+                    }).join('; ');
                 }
+                result[resultIndex] = cookiesString;
                 if (!--remained) {
-                    var cookieList = Array.from(cookieMap.entries()).map(function (entry) {
-                        return entry[0] + "=" + entry[1];
-                    });
-                    var cookiesString = cookieList.join('; ');
-                    callback([cookiesString]);
+                    callback(result);
                 }
-            });
+            }.bind(this, i));
     }
 }
 
