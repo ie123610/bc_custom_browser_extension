@@ -174,7 +174,8 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
     console.log(`[下载任务拦截] 文件名 "${filename}" 匹配接管扩展名 (.${fileExt})，准备推送到比特彗星...`);
     sendToBitComet(item).then((success) => {
       if (success) {
-        // 推送成功：自动取消并清理浏览器端的原生下载任务
+        // 推送成功：先调用 suggest() 满足异步回调契约，再取消并清理浏览器端原生下载
+        suggest({ filename: item.filename, conflictAction: 'uniquify' });
         try {
           chrome.downloads.cancel(item.id, () => {
             chrome.downloads.erase({ id: item.id });
