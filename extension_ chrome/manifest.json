@@ -23,8 +23,6 @@
     "cookies",
     "nativeMessaging",
     "downloads",
-    "activeTab",
-    "scripting",
     "storage"
   ],
   "host_permissions": [
