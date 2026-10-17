@@ -1,6 +1,6 @@
 ﻿// Firefox 插件
 
-const BITCOMET_NATIVE_HOST = 'org.custom.bitcomet_bridge';
+const BITCOMET_NATIVE_HOST = 'io.github.ie123610.bclauncher';
 const contextMenuId = "BitCometContextMenu";
 
 // 跨浏览器 API 命名空间兼容
